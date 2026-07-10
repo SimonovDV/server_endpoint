@@ -2685,7 +2685,7 @@ async def db_login(phone: str, hashed_password: str):
     Назначение: Авторизация пользователя через dbo.USR_Select_ID
     Описание:
         Вызывает хранимую процедуру авторизации строго в формате:
-            EXECUTE dbo.USR_Select_ID @USR_Phone = ?, @USR_Password = ?
+            EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?
         Параметры политики блокировки со стороны сайта или ПБД не передаются.
 
         Единственный поддерживаемый формат блокировки — новый JSON-ответ БД:
@@ -2884,7 +2884,7 @@ async def db_login(phone: str, hashed_password: str):
         cursor = db_connection.cursor()
         try:
             cursor.execute(
-                "EXECUTE dbo.USR_Select_ID @USR_Phone = ?, @USR_Password = ?",
+                "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?",
                 phone,
                 hashed_password
             )
@@ -2990,7 +2990,7 @@ async def db_setdocument(user_id: int, name: str, extension: str, cloud_link: st
                 print(f"  Ссылка на облако: {cloud_link}")
         
         query = """
-        EXECUTE [dbo].[Doc_created_at] 
+        EXECUTE [dbo].[DCT_Insert] 
             @USR_Id = ?, 
             @DOC_Type = ?, 
             @DOC_Name = ?, 
@@ -3111,7 +3111,7 @@ async def db_documentsigned(document_id: str, is_signed: bool) -> bool:
             print_status("INFO", f"Вызов хранимой процедуры Doc_Update_signed", 
                         f"document_id: {doc_id_int}, is_signed: {doc_is_signed_int} ({'подписан' if is_signed else 'отклонен'})")
         
-        query = "EXECUTE [dbo].[Doc_Update_signed] @DOC_Id = ?, @DOC_Is_signed = ?"
+        query = "EXECUTE [dbo].[DCT_Update_signed] @DOC_Id = ?, @DOC_Is_signed = ?"
         
         cursor = db_connection.cursor()
         
@@ -3208,7 +3208,7 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
             print_status("INFO", f"Вызов хранимой процедуры DOC_Select_ID", 
                         f"user_id: {user_id_int}")
         
-        query = "EXECUTE [dbo].[DOC_Select_ID] @USR_ID = ?"
+        query = "EXECUTE [dbo].[DCT_Select] @USR_ID = ?"
         
         cursor = db_connection.cursor()
         
@@ -3404,7 +3404,7 @@ async def db_useremailing(user_id: int, consent_to_mailing: bool) -> bool:
         raise Exception("База данных не доступна")
     
     try:
-        query = "EXECUTE [dbo].[USR_Update_consent_to_mailing] @USR_ID = ?, @USR_consent_to_mailing = ?"
+        query = "EXECUTE [dbo].[USR_Update_ConsentToMailing] @USR_ID = ?, @USR_consent_to_mailing = ?"
         
         if verbose_mode:
             consent_text = "согласие получено" if consent_to_mailing else "отказ от рассылки"
@@ -3501,7 +3501,7 @@ async def db_useraccess(user_id: int, period_minutes: int) -> int:
             print_status("INFO", f"Вызов хранимой процедуры USR_Access_Select", 
                         f"user_id: {user_id}, period_minutes: {period_minutes}")
         
-        query = "EXECUTE [dbo].[USR_Access_Select] @USR_ID = ?, @min = ?"
+        query = "EXECUTE [dbo].[USR_Update_AccessToApp_Time] @USR_ID = ?, @min = ?"
         
         cursor = db_connection.cursor()
         
@@ -3601,7 +3601,7 @@ async def db_calculate_payment_distribution(json_str: str) -> Optional[str]:
             print(f"  Данные: {json_str[:200]}..." if len(json_str) > 200 else f"  Данные: {json_str}")
         
         # Теперь процедура принимает только один параметр - JSON строку
-        query = "EXECUTE [dbo].[usp_CalculatePaymentDistribution] @Json = ?"
+        query = "EXECUTE [dbo].[PYM_CalculateDistribution] @Json = ?"
         
         cursor = db_connection.cursor()
         
