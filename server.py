@@ -6253,7 +6253,7 @@ async def find_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
             pass
         raise
 
-async def get_user_by_phone(request):
+async def get_user_by_phone_legacy(request):
     """
     Получение пользователя по номеру телефона.
     Требование ТЗ: предварительно блокировать запрос без обращения к БД,
@@ -6655,7 +6655,7 @@ async def get_setpayment(request: web.Request) -> web.Response:
             data_obj = json.loads(json_str)  # Парсим только для проверки пользователя
             user_id = data_obj.get('user_id')
             if user_id:
-                blocked_response = await ensure_user_request_not_blocked(request, user_id=user_id)
+                blocked_response = await ensure_user_request_not_blocked(user_id=user_id, endpoint=request.path)
                 if blocked_response:
                     return blocked_response
                 user_exists = await db_userid(user_id)
@@ -6999,7 +6999,7 @@ async def get_setdocument(request):
     if blocked_response is not None:
         return blocked_response
 
-    result = await db_setdocument(data)
+    result = await db_setdocument(user_id=int(data.get('user_id') or data.get('id')), name=data.get('name') or data.get('filename') or '', extension=data.get('extension') or data.get('type') or '', cloud_link=data.get('cloud_link') or data.get('link') or '', description=data.get('description'))
 
     return create_response(
         result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
@@ -7062,7 +7062,7 @@ async def get_documentsigned(request):
         if blocked_response is not None:
             return blocked_response
 
-    result = await db_documentsigned(data)
+    result = await db_documentsigned(document_id=data.get('document_id') or data.get('doc_id'), is_signed=bool(data.get('is_signed')))
 
     return create_response(
         result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
@@ -7131,7 +7131,7 @@ async def get_documentlist(request):
     if blocked_response is not None:
         return blocked_response
 
-    result = await db_documentlist(data)
+    result = await db_documentlist(str(data.get('user_id') or data.get('id')))
 
     return create_response(
         result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
@@ -7172,7 +7172,7 @@ async def get_useremailing(request: web.Request) -> web.Response:
                 print_status("ERROR", f"Ошибка валидации параметров", validation_result['message'])
         else:
             user_id = data['user_id']
-            blocked_response = await ensure_user_request_not_blocked(request, user_id=user_id)
+            blocked_response = await ensure_user_request_not_blocked(user_id=user_id, endpoint=request.path)
             if blocked_response:
                 return blocked_response
             consent_to_mailing = data['consent_to_mailing']
@@ -8262,7 +8262,8 @@ async def reload_configuration(config_path: str = 'config.json', is_initial_load
         
         # Создаем новый объект конфигурации
         try:
-            new_config = Config(config_data)
+            validated_config = validate_config_file(config_data)
+            new_config = Config(validated_config)
         except Exception as e:
             print_status("ERROR", f"Ошибка создания объекта конфигурации", str(e))
             return False
@@ -8771,7 +8772,6 @@ async def main():
     start_time = time.time()
     
     app = await init_app()
-    blocked_user_cleanup_task = asyncio.create_task(start_blocked_user_cleanup_task())
     
     # Увеличиваем максимальный размер тела запроса
     # aiohttp по умолчанию ограничивает до 1 МБ, нам нужно больше
