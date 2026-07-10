@@ -54,14 +54,17 @@ import hashlib
 import requests
 import random
 import string
-import collections
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiohttp import web
 from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.exceptions import InvalidSignature
+from typing import Dict, Any, Optional, List
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
-from typing import Dict, Any, Optional, List
+from datetime import datetime, timedelta
 
 
 # --- Глобальные переменные и конфигурация ---
@@ -69,69 +72,30 @@ from typing import Dict, Any, Optional, List
 request_store = {}
 request_lock = asyncio.Lock()
 
-
 # Переменные для управления перезагрузкой конфигурации
 config_reload_interval = 0  # Интервал перезагрузки в минутах (0 - отключено)
 last_config_reload_time = None  # Время последней перезагрузки конфигурации
 config_reload_task = None  # Задача периодической перезагрузки
 
-
-# --- In-memory структуры механизма блокировок ---
-
-# Словарь активных блокировок пользователей.
-# Ключ: нормализованный номер телефона (str) или "uid:<user_id>" (str).
-# Значение: datetime локального времени ПБД, до которого действует блокировка.
-# Верхний лимит размера: max_blocked_users_cache_size (из конфига).
-# При превышении — вытесняются записи с истёкшим сроком, затем самые старые (FIFO).
-# Используется OrderedDict для поддержания порядка вставки (FIFO-вытеснение).
-blocked_users: collections.OrderedDict = collections.OrderedDict()
-# Lock для потокобезопасного доступа к blocked_users из корутин asyncio.
-blocked_users_lock = asyncio.Lock()
-
-# Буфер неуспешных попыток авторизации.
-# Ключ: нормализованный номер телефона (str).
-# Значение: список dict с полями {"timestamp": datetime, "request_id": str}.
-# Верхний лимит суммарного числа записей по всем ключам: max_failed_login_events (из конфига).
-# При превышении — вытесняется самая старая запись среди всех ключей (глобальный FIFO).
-failed_login_events: Dict[str, List[Dict[str, Any]]] = {}
-# Lock для потокобезопасного доступа к failed_login_events.
-failed_login_events_lock = asyncio.Lock()
-
-# Словарь per-user asyncio.Lock для последовательной обработки запросов
-# POST /user/login одного и того же пользователя.
-# Ключ: нормализованный номер телефона (str).
-# Значение: asyncio.Lock().
-# Записи создаются лениво при первом обращении и не удаляются в рантайме
-# (объём ограничен числом уникальных пользователей, обращавшихся к серверу).
-user_login_locks: Dict[str, asyncio.Lock] = {}
-# Lock для потокобезопасного создания/чтения записей в user_login_locks.
-user_login_locks_meta_lock = asyncio.Lock()
-
-# Задача фоновой очистки устаревших записей blocked_users.
-# Запускается при старте сервера, управляется параметром
-# blocked_user_cache_cleanup_interval_seconds из конфига.
-blocked_users_cleanup_task = None
-
-
 # --- Глобальные переменные статистики ---
 statistics = {
     # Время запуска/обнуления статистики
     "reset_time": None,
-
+    
     # Статистика запросов к БД
     "db_queries": {
         "total_count": 0,
         "max_execution_time": 0,
         "slowest_queries": []  # Максимум 5 записей
     },
-
+    
     # Статистика запросов к облаку
     "cloud_requests": {
         "total_count": 0,
         "success_count": 0,
         "failed_count": 0
     },
-
+    
     # Общая статистика запросов к серверу
     "server_requests": {
         "total_count": 0,
@@ -140,387 +104,14 @@ statistics = {
         "peak_hour": {"hour": None, "count": 0, "date": None},
         "peak_day": {"day": None, "count": 0, "date": None}
     },
-
-    # Лимиты счётчиков (можно вынести в конфиг)
+    
+    # Лимиты счетчиков (можно вынести в конфиг)
     "limits": {
         "max_total_count": 2**31 - 1,  # MAX_INT для 32-бит
         "warning_threshold": 0.8,      # 80% от максимума
         "max_slow_queries": 5
     }
 }
-
-# --- Глобальные переменные и конфигурация ---
-# Глобальный словарь для хранения запросов
-request_store = {}
-request_lock = asyncio.Lock()
-
-
-# Переменные для управления перезагрузкой конфигурации
-config_reload_interval = 0  # Интервал перезагрузки в минутах (0 - отключено)
-last_config_reload_time = None  # Время последней перезагрузки конфигурации
-config_reload_task = None  # Задача периодической перезагрузки
-
-
-# --- In-memory структуры механизма блокировок ---
-
-# Словарь активных блокировок пользователей.
-# Ключ: нормализованный номер телефона (str) или "uid:<user_id>" (str).
-# Значение: datetime локального времени ПБД, до которого действует блокировка.
-# Верхний лимит размера: max_blocked_users_cache_size (из конфига).
-# При превышении — вытесняются записи с истёкшим сроком, затем самые старые (FIFO).
-# Используется OrderedDict для поддержания порядка вставки (FIFO-вытеснение).
-blocked_users: collections.OrderedDict = collections.OrderedDict()
-# Lock для потокобезопасного доступа к blocked_users из корутин asyncio.
-blocked_users_lock = asyncio.Lock()
-
-# Буфер неуспешных попыток авторизации.
-# Ключ: нормализованный номер телефона (str).
-# Значение: список dict с полями {"timestamp": datetime, "request_id": str}.
-# Верхний лимит суммарного числа записей по всем ключам: max_failed_login_events (из конфига).
-# При превышении — вытесняется самая старая запись среди всех ключей (глобальный FIFO).
-failed_login_events: Dict[str, List[Dict[str, Any]]] = {}
-# Lock для потокобезопасного доступа к failed_login_events.
-failed_login_events_lock = asyncio.Lock()
-
-# Словарь per-user asyncio.Lock для последовательной обработки запросов
-# POST /user/login одного и того же пользователя.
-# Ключ: нормализованный номер телефона (str).
-# Значение: asyncio.Lock().
-# Записи создаются лениво при первом обращении и не удаляются в рантайме
-# (объём ограничен числом уникальных пользователей, обращавшихся к серверу).
-user_login_locks: Dict[str, asyncio.Lock] = {}
-# Lock для потокобезопасного создания/чтения записей в user_login_locks.
-user_login_locks_meta_lock = asyncio.Lock()
-
-# Задача фоновой очистки устаревших записей blocked_users.
-# Запускается при старте сервера, управляется параметром
-# blocked_user_cache_cleanup_interval_seconds из конфига.
-blocked_users_cleanup_task = None
-
-
-# --- Глобальные переменные статистики ---
-statistics = {
-    # Время запуска/обнуления статистики
-    "reset_time": None,
-
-    # Статистика запросов к БД
-    "db_queries": {
-        "total_count": 0,
-        "max_execution_time": 0,
-        "slowest_queries": []  # Максимум 5 записей
-    },
-
-    # Статистика запросов к облаку
-    "cloud_requests": {
-        "total_count": 0,
-        "success_count": 0,
-        "failed_count": 0
-    },
-
-    # Общая статистика запросов к серверу
-    "server_requests": {
-        "total_count": 0,
-        "hourly_stats": {},  # { "час": количество }
-        "daily_stats": {},   # { "день_недели": { "count": количество, "max_hourly": максимум } }
-        "peak_hour": {"hour": None, "count": 0, "date": None},
-        "peak_day": {"day": None, "count": 0, "date": None}
-    },
-
-    # Лимиты счётчиков (можно вынести в конфиг)
-    "limits": {
-        "max_total_count": 2**31 - 1,  # MAX_INT для 32-бит
-        "warning_threshold": 0.8,      # 80% от максимума
-        "max_slow_queries": 5
-    }
-}
-
-
-
-async def get_user_lock(normalized_phone: str) -> asyncio.Lock:
-    """
-    Название: get_user_lock
-    Назначение: Получение персональной async-блокировки для пользователя по нормализованному телефону
-    Описание: Возвращает отдельный asyncio.Lock для конкретного пользователя, чтобы сериализовать конкурентные попытки входа
-    Принцип работы: Проверяет наличие lock в глобальном словаре per_user_locks и создает новый при необходимости
-    Входящие параметры:
-        normalized_phone - нормализованный номер телефона пользователя
-    Исходящие параметры: asyncio.Lock - объект асинхронной блокировки для данного пользователя
-    """
-    async with per_user_locks_meta_lock:
-        if normalized_phone not in per_user_locks:
-            per_user_locks[normalized_phone] = asyncio.Lock()
-        return per_user_locks[normalized_phone]
-
-
-def apply_time_offset(dt_db: datetime) -> datetime:
-    """
-    Название: apply_time_offset
-    Назначение: Преобразование времени из БД во внутреннее локальное время сервера
-    Описание: Корректирует время, полученное из базы данных, с учетом вычисленного смещения времени
-    Принцип работы: Добавляет глобальное смещение db_time_offset_seconds к переданному времени
-    Входящие параметры:
-        dt_db - дата и время, полученные из базы данных
-    Исходящие параметры: datetime - скорректированное локальное время
-    """
-    return dt_db + timedelta(seconds=db_time_offset_seconds)
-
-
-def update_time_offset(db_current_ts: datetime, pbd_receive_time: datetime) -> None:
-    """
-    Название: update_time_offset
-    Назначение: Обновление смещения времени между БД и приложением
-    Описание: Вычисляет разницу между временем БД и локальным временем получения данных приложением
-    Принцип работы: Сохраняет разницу в секундах в глобальную переменную db_time_offset_seconds
-    Входящие параметры:
-        db_current_ts - текущее время из базы данных
-        pbd_receive_time - локальное время получения ответа от базы данных
-    Исходящие параметры: Отсутствуют
-    """
-    global db_time_offset_seconds
-
-    db_time_offset_seconds = (pbd_receive_time - db_current_ts).total_seconds()
-
-    if verbose_mode:
-        print_status("INFO", f"Обновлено смещение времени БД", f"{db_time_offset_seconds:.1f} сек")
-
-
-async def register_block(phone: str, uid=None, blocked_until_local: datetime = None) -> None:
-    """
-    Название: register_block
-    Назначение: Регистрация блокировки пользователя в in-memory кэше
-    Описание: Сохраняет сведения о блокировке пользователя по телефону и/или UID во временном кэше сервера
-    Принцип работы: Добавляет запись в blocked_users, очищает устаревшие записи и контролирует максимальный размер кэша
-    Входящие параметры:
-        phone - нормализованный номер телефона пользователя
-        uid - идентификатор пользователя (опционально)
-        blocked_until_local - дата и время окончания блокировки в локальном времени сервера
-    Исходящие параметры: Отсутствуют
-    """
-    global blocked_users
-
-    entry = {
-        "blocked_until": blocked_until_local,
-        "phone": phone,
-        "uid": uid
-    }
-
-    max_size = getattr(config, 'max_blocked_users_cache_size', 200) if config else 200
-
-    async with blocked_users_lock:
-        if len(blocked_users) >= max_size:
-            now = datetime.now()
-
-            expired = [k for k, v in blocked_users.items() if v["blocked_until"] <= now]
-            for k in expired:
-                del blocked_users[k]
-
-            if len(blocked_users) >= max_size and blocked_users:
-                oldest_key = min(blocked_users, key=lambda k: blocked_users[k]["blocked_until"])
-                del blocked_users[oldest_key]
-
-        blocked_users[f"phone:{phone}"] = entry
-        if uid:
-            blocked_users[f"uid:{uid}"] = entry
-
-    log_block_event("BLOCK_REGISTERED", phone, uid, blocked_until_local)
-
-
-async def check_user_blocked(user_id=None, phone: str = None) -> dict:
-    """
-    Название: check_user_blocked
-    Назначение: Проверка наличия активной блокировки пользователя в in-memory кэше
-    Описание: Проверяет пользователя по UID и/или номеру телефона на наличие активной блокировки
-    Принцип работы: Ищет запись в blocked_users, удаляет просроченные записи и возвращает результат проверки
-    Входящие параметры:
-        user_id - идентификатор пользователя (опционально)
-        phone - нормализованный номер телефона пользователя (опционально)
-    Исходящие параметры: dict - {"blocked": bool, "blocked_until": datetime | None}
-    """
-    now = datetime.now()
-    keys = []
-
-    if phone:
-        keys.append(f"phone:{phone}")
-    if user_id:
-        keys.append(f"uid:{user_id}")
-
-    async with blocked_users_lock:
-        for key in keys:
-            entry = blocked_users.get(key)
-            if entry:
-                if entry["blocked_until"] > now:
-                    return {
-                        "blocked": True,
-                        "blocked_until": entry["blocked_until"]
-                    }
-                else:
-                    blocked_users.pop(key, None)
-
-    return {
-        "blocked": False,
-        "blocked_until": None
-    }
-
-
-async def clear_block(user_id=None, phone: str = None) -> None:
-    """
-    Название: clear_block
-    Назначение: Снятие блокировки пользователя из in-memory кэша
-    Описание: Удаляет сведения о блокировке пользователя по UID и/или номеру телефона
-    Принцип работы: Удаляет соответствующие ключи из blocked_users и логирует снятие блокировки
-    Входящие параметры:
-        user_id - идентификатор пользователя (опционально)
-        phone - нормализованный номер телефона пользователя (опционально)
-    Исходящие параметры: Отсутствуют
-    """
-    async with blocked_users_lock:
-        for key in (f"phone:{phone}" if phone else None, f"uid:{user_id}" if user_id else None):
-            if key:
-                blocked_users.pop(key, None)
-
-    log_block_event("BLOCK_CLEARED", phone, user_id, None)
-
-
-async def register_failed_attempt(phone: str) -> None:
-    """
-    Название: register_failed_attempt
-    Назначение: Регистрация неуспешной попытки входа пользователя
-    Описание: Добавляет запись о неуспешной попытке входа в FIFO-буфер in-memory
-    Принцип работы: Помещает событие в deque failed_login_events и ограничивает буфер по размеру
-    Входящие параметры:
-        phone - нормализованный номер телефона пользователя
-    Исходящие параметры: Отсутствуют
-    """
-    max_events = getattr(config, 'max_failed_login_events', 10000) if config else 10000
-
-    async with failed_login_events_lock:
-        failed_login_events.append({
-            "phone": phone,
-            "ts": datetime.now()
-        })
-
-        while len(failed_login_events) > max_events:
-            failed_login_events.popleft()
-
-
-async def clear_failed_attempts(phone: str) -> None:
-    """
-    Название: clear_failed_attempts
-    Назначение: Очистка неуспешных попыток входа пользователя
-    Описание: Удаляет из буфера все записи о неуспешных попытках для указанного телефона
-    Принцип работы: Пересобирает deque failed_login_events без записей указанного пользователя
-    Входящие параметры:
-        phone - нормализованный номер телефона пользователя
-    Исходящие параметры: Отсутствуют
-    """
-    async with failed_login_events_lock:
-        kept = deque(e for e in failed_login_events if e["phone"] != phone)
-        failed_login_events.clear()
-        failed_login_events.extend(kept)
-
-
-def log_block_event(event: str, phone, uid, blocked_until) -> None:
-    """
-    Название: log_block_event
-    Назначение: Логирование событий блокировки пользователей
-    Описание: Формирует и записывает в консоль и файл сообщение о блокировке, снятии блокировки или очистке кэша
-    Принцип работы: Собирает текст сообщения и отправляет его в print_status и file_logger при наличии
-    Входящие параметры:
-        event - тип события блокировки
-        phone - номер телефона пользователя
-        uid - идентификатор пользователя
-        blocked_until - дата и время окончания блокировки
-    Исходящие параметры: Отсутствуют
-    """
-    msg = f"[BLOCK] {event} phone={phone} uid={uid}"
-    if blocked_until:
-        msg += f" until={blocked_until.isoformat()}"
-
-    if verbose_mode:
-        print_status("INFO", f"Событие блокировки", msg)
-
-    if file_logger:
-        file_logger.info(msg)
-
-
-async def blocked_user_cache_cleanup_runner():
-    """
-    Название: blocked_user_cache_cleanup_runner
-    Назначение: Фоновая очистка in-memory кэша блокировок пользователей
-    Описание: Периодически удаляет просроченные записи блокировок из глобального кэша blocked_users
-    Принцип работы: С заданным интервалом проверяет все записи blocked_users и удаляет устаревшие
-    Входящие параметры: Отсутствуют
-    Исходящие параметры: Отсутствуют
-    """
-    while True:
-        interval = getattr(config, 'blocked_user_cache_cleanup_interval_seconds', 300) if config else 300
-        await asyncio.sleep(max(interval, 10))
-
-        try:
-            now = datetime.now()
-
-            async with blocked_users_lock:
-                expired = [k for k, v in list(blocked_users.items()) if v["blocked_until"] <= now]
-                for key in expired:
-                    blocked_users.pop(key, None)
-
-            if verbose_mode and expired:
-                print_status("INFO", f"Очистка кэша блокировок", f"удалено записей: {len(expired)}")
-
-            if file_logger and expired:
-                file_logger.info(f"[BLOCK] CACHE_CLEANUP removed={len(expired)}")
-
-        except Exception as ex:
-            if verbose_mode:
-                print_status("ERROR", f"Ошибка очистки кэша блокировок", str(ex))
-
-
-def _make_blocked_response(blocked_until: datetime) -> dict:
-    """
-    Название: _make_blocked_response
-    Назначение: Формирование стандартного JSON-ответа о блокировке пользователя
-    Описание: Возвращает унифицированную структуру ответа для случаев активной блокировки
-    Принцип работы: Формирует словарь с кодом ошибки, текстом сообщения и временем окончания блокировки
-    Входящие параметры:
-        blocked_until - дата и время окончания блокировки
-    Исходящие параметры: dict - словарь JSON-ответа о блокировке
-    """
-    return {
-        "status": "error",
-        "code": 2,
-        "errorcode": "USER_BLOCKED",
-        "message": "Пользователь временно заблокирован",
-        "blocked_until": blocked_until.isoformat(),
-        "server_time": datetime.now().isoformat()
-    }
-
-
-async def block_guard(user_id=None, phone: str = None):
-    """
-    Название: block_guard
-    Назначение: Универсальная проверка блокировки пользователя перед выполнением защищенной операции
-    Описание: Проверяет наличие активной блокировки и при необходимости возвращает готовый HTTP JSON-ответ
-    Принцип работы: Использует check_user_blocked и формирует web.Response при наличии блокировки
-    Входящие параметры:
-        user_id - идентификатор пользователя (опционально)
-        phone - нормализованный номер телефона пользователя (опционально)
-    Исходящие параметры: web.Response или None - HTTP ответ при блокировке либо None если блокировки нет
-    """
-    block_check = await check_user_blocked(user_id=user_id, phone=phone)
-
-    if block_check["blocked"]:
-        key = f"uid:{user_id}" if user_id else f"phone:{phone}"
-
-        if verbose_mode:
-            print_status("INFO", f"Доступ запрещен: пользователь заблокирован", f"{key} until={block_check['blocked_until'].isoformat()}")
-
-        if file_logger:
-            file_logger.info(f"[BLOCK] REQUEST_DENIED {key} until={block_check['blocked_until'].isoformat()}")
-
-        return web.json_response(_make_blocked_response(block_check["blocked_until"]), status=200)
-
-    return None
-
 
 # --- ЦВЕТА ДЛЯ ВЫВОДА В КОНСОЛЬ ---
 class Colors:
@@ -545,7 +136,7 @@ class Config:
         self.host = config_data.get('host', 'localhost')
         self.port = config_data.get('port', 8000)
         self.debug = config_data.get('debug', False)
-        self.config_reload_interval_minutes = config_data.get('config_reload_interval_minutes', 0)
+        self.config_reload_interval_minutes = config_data.get('config_reload_interval_minutes', 0)        
 
         # Конфигурация безопасности
         security = config_data.get('security', {})
@@ -554,16 +145,16 @@ class Config:
         self.signature_ttl = security.get('signature_ttl', 300)
         self.default_token_server = security.get('default_token_server', '')
         self.allowed_tokens = set(security.get('allowed_tokens', []))
-
+        
         # Валидация allowed_tokens
         if not self.allowed_tokens:
             raise ValueError("Список allowed_tokens не может быть пустым")
-
+        
         # Настройки режима безопасности (true - отключено, false - включено)
         self.disable_certificates = security.get('disable_certificates', False)
         self.disable_token_auth = security.get('disable_token_auth', False)
         self.disable_signature = security.get('disable_signature', False)
-
+        
         # Конфигурация безопасности эндпоинтов
         self.endpoint_security = {}
         endpoint_security_config = security.get('endpoint_security', {})
@@ -571,44 +162,15 @@ class Config:
             normalized_endpoint = endpoint.strip('/').lower()
             normalized_level = security_level.lower().strip()
             self.endpoint_security[normalized_endpoint] = normalized_level
-
-        # Параметры in-memory механизма блокировок пользователей (п. 8.2 ТЗ).
-        # Политика блокировки (порог, окно, длительность) хранится на стороне БД
-        # и НЕ передаётся из сайта через ПБД (п. 8.1 ТЗ).
-        blocking = config_data.get('blocking', {})
-
-        # Интервал (в секундах) фоновой очистки устаревших записей в blocked_users.
-        # Типичное значение: 300 секунд (5 минут).
-        self.blocked_user_cache_cleanup_interval_seconds = blocking.get(
-            'blocked_user_cache_cleanup_interval_seconds', 300
-        )
-
-        # Верхний лимит суммарного числа записей в буфере неуспешных попыток
-        # авторизации (failed_login_events). При превышении — FIFO-вытеснение.
-        # Типичный диапазон: 5000–50000.
-        self.max_failed_login_events = blocking.get('max_failed_login_events', 10000)
-
-        # Верхний лимит числа записей в in-memory кэше активных блокировок
-        # (blocked_users). При превышении сначала удаляются истёкшие блокировки,
-        # затем — самые старые (FIFO). Типичный диапазон: 100–500.
-        self.max_blocked_users_cache_size = blocking.get('max_blocked_users_cache_size', 200)
-
-        # Валидация параметров блокировки
-        if not isinstance(self.blocked_user_cache_cleanup_interval_seconds, int) or \
-                self.blocked_user_cache_cleanup_interval_seconds < 0:
-            raise ValueError(
-                "blocked_user_cache_cleanup_interval_seconds должен быть целым неотрицательным числом"
-            )
-        if not isinstance(self.max_failed_login_events, int) or \
-                self.max_failed_login_events < 1:
-            raise ValueError(
-                "max_failed_login_events должен быть целым положительным числом"
-            )
-        if not isinstance(self.max_blocked_users_cache_size, int) or \
-                self.max_blocked_users_cache_size < 1:
-            raise ValueError(
-                "max_blocked_users_cache_size должен быть целым положительным числом"
-            )
+        
+        # НАСТРОЙКИ БЕЗОПАСНОСТИ ВХОДА 
+        login_security_config = security.get('login_security', {})
+        self.login_security = {
+            'enabled': login_security_config.get('enabled', False),
+            'max_failed_attempts': login_security_config.get('max_failed_attempts', 5),
+            'check_period_minutes': login_security_config.get('check_period_minutes', 60),
+            'allow_successful_login_during_lockout': login_security_config.get('allow_successful_login_during_lockout', False)
+        }
 
         # Конфигурация базы данных MSSQL
         database = config_data.get('database', {})
@@ -621,19 +183,19 @@ class Config:
         self.db_connection_timeout = database.get('connection_timeout', 10)
         self.allow_start_without_db = database.get('allow_start_without_db', False)
         self.select_top = database.get('select_top', 1000)
-
-        # Параметры управления соединением
+        
+        # НОВЫЕ ПАРАМЕТРЫ ДЛЯ УПРАВЛЕНИЯ СОЕДИНЕНИЕМ
         connection_pooling = database.get('connection_pooling', {})
         self.db_pooling_enabled = connection_pooling.get('enabled', True)
         self.db_max_pool_size = connection_pooling.get('max_pool_size', 10)
         self.db_min_pool_size = connection_pooling.get('min_pool_size', 1)
         self.db_connection_lifetime = connection_pooling.get('connection_lifetime', 300)
-
+        
         health_check = database.get('health_check', {})
         self.db_health_check_enabled = health_check.get('enabled', True)
         self.db_health_check_interval = health_check.get('interval_seconds', 300)
 
-        # Конфигурация логирования
+        # Конфигурация логирования - ИСПРАВЛЕННАЯ ВЕРСИЯ
         logging_config = config_data.get('logging', {})
         self.log_to_db = logging_config.get('log_to_db', [])
         if isinstance(self.log_to_db, bool):
@@ -673,7 +235,7 @@ class Config:
         self.allow_start_without_cloud = cloud_config.get('allow_start_without_cloud', False)
 
         # Максимальный размер загружаемого файла
-        self.max_upload_size = cloud_config.get('max_upload_size_mb', 10)
+        self.max_upload_size = cloud_config.get('max_upload_size_mb', 10)  # По умолчанию 10 МБ
 
 
     def get_endpoint_security_level(self, endpoint_path: str) -> str:
@@ -681,23 +243,26 @@ class Config:
         Название: get_endpoint_security_level
         Назначение: Получение уровня безопасности для указанного эндпоинта
         Описание: Определяет требуемый уровень безопасности для эндпоинта на основе конфигурации
-        Принцип работы: Нормализует путь эндпоинта и ищет соответствующее правило безопасности,
+        Принцип работы: Нормализует путь эндпоинта и ищет соответствующее правило безопасности, 
                     проверяя сначала точное совпадение, затем родительские пути
         Входящие параметры: endpoint_path - путь эндпоинта
         Исходящие параметры: str - уровень безопасности ('token', 'signature', 'disabled', 'public') или None если правило не найдено
         """
+        # Нормализуем путь эндпоинта - убираем начальный и конечный слэш, приводим к нижнему регистру
         normalized_path = endpoint_path.strip('/').lower()
-
+        
         if verbose_mode:
             print_status("INFO", f"Поиск уровня безопасности для пути: '{endpoint_path}' -> нормализован: '{normalized_path}'")
             print_status("INFO", f"Доступные правила: {list(self.endpoint_security.keys())}")
-
+        
+        # Проверяем точное совпадение
         if normalized_path in self.endpoint_security:
             security_level = self.endpoint_security[normalized_path]
             if verbose_mode:
                 print_status("INFO", f"Найдено точное совпадение: {security_level}")
             return security_level
-
+        
+        # Проверяем родительские пути (например, для /help/info проверяем /help)
         path_parts = normalized_path.split('/')
         for i in range(len(path_parts) - 1, 0, -1):
             parent_path = '/'.join(path_parts[:i])
@@ -706,11 +271,11 @@ class Config:
                 if verbose_mode:
                     print_status("INFO", f"Найдено совпадение по родительскому пути '{parent_path}': {security_level}")
                 return security_level
-
+        
+        # Правило не найдено - используем стандартную безопасность
         if verbose_mode:
             print_status("INFO", f"Правило не найдено, используется стандартная безопасность")
         return None
-
 
     def get_response_token(self, request_token: str = None) -> str:
         """
@@ -723,231 +288,25 @@ class Config:
         """
         if request_token:
             return request_token
-
+        
         if self.default_token_server and len(self.default_token_server) > 0:
             return self.default_token_server
-
+        
+        # Возвращаем первый токен из списка allowed_tokens
         return next(iter(self.allowed_tokens))
-
-
-    def is_log_to_db_enabled(self) -> bool:
-        """Проверяет, включено ли вообще логирование в БД"""
-        return isinstance(self.log_to_db, list) and len(self.log_to_db) > 0
-
-
-    def is_log_to_file_enabled(self) -> bool:
-        """Проверяет, включено ли вообще логирование в файл"""
-        return isinstance(self.log_to_file, list) and len(self.log_to_file) > 0
-
-
-# --- КЛАСС КОНФИГУРАЦИИ ---
-class Config:
-    def __init__(self, config_data: Dict[str, Any]):
-        """
-        Название: __init__
-        Назначение: Инициализация конфигурации сервера
-        Описание: Загружает и валидирует параметры конфигурации из JSON файла
-        Принцип работы: Парсит словарь с конфигурацией и устанавливает значения атрибутов
-        Входящие параметры: config_data - словарь с данными конфигурации
-        Исходящие параметры: Отсутствуют
-        """
-        self.host = config_data.get('host', 'localhost')
-        self.port = config_data.get('port', 8000)
-        self.debug = config_data.get('debug', False)
-        self.config_reload_interval_minutes = config_data.get('config_reload_interval_minutes', 0)
-
-        # Конфигурация безопасности
-        security = config_data.get('security', {})
-        self.server_private_key_path = security.get('server_private_key_path', 'keys/private_server.pem')
-        self.client_public_key_path = security.get('client_public_key_path', 'keys/public_client.pem')
-        self.signature_ttl = security.get('signature_ttl', 300)
-        self.default_token_server = security.get('default_token_server', '')
-        self.allowed_tokens = set(security.get('allowed_tokens', []))
-
-        # Валидация allowed_tokens
-        if not self.allowed_tokens:
-            raise ValueError("Список allowed_tokens не может быть пустым")
-
-        # Настройки режима безопасности (true - отключено, false - включено)
-        self.disable_certificates = security.get('disable_certificates', False)
-        self.disable_token_auth = security.get('disable_token_auth', False)
-        self.disable_signature = security.get('disable_signature', False)
-
-        # Конфигурация безопасности эндпоинтов
-        self.endpoint_security = {}
-        endpoint_security_config = security.get('endpoint_security', {})
-        for endpoint, security_level in endpoint_security_config.items():
-            normalized_endpoint = endpoint.strip('/').lower()
-            normalized_level = security_level.lower().strip()
-            self.endpoint_security[normalized_endpoint] = normalized_level
-
-        # Параметры in-memory механизма блокировок пользователей (п. 8.2 ТЗ).
-        # Политика блокировки (порог, окно, длительность) хранится на стороне БД
-        # и НЕ передаётся из сайта через ПБД (п. 8.1 ТЗ).
-        blocking = config_data.get('blocking', {})
-
-        # Интервал (в секундах) фоновой очистки устаревших записей в blocked_users.
-        # Типичное значение: 300 секунд (5 минут).
-        self.blocked_user_cache_cleanup_interval_seconds = blocking.get(
-            'blocked_user_cache_cleanup_interval_seconds', 300
-        )
-
-        # Верхний лимит суммарного числа записей в буфере неуспешных попыток
-        # авторизации (failed_login_events). При превышении — FIFO-вытеснение.
-        # Типичный диапазон: 5000–50000.
-        self.max_failed_login_events = blocking.get('max_failed_login_events', 10000)
-
-        # Верхний лимит числа записей в in-memory кэше активных блокировок
-        # (blocked_users). При превышении сначала удаляются истёкшие блокировки,
-        # затем — самые старые (FIFO). Типичный диапазон: 100–500.
-        self.max_blocked_users_cache_size = blocking.get('max_blocked_users_cache_size', 200)
-
-        # Валидация параметров блокировки
-        if not isinstance(self.blocked_user_cache_cleanup_interval_seconds, int) or \
-                self.blocked_user_cache_cleanup_interval_seconds < 0:
-            raise ValueError(
-                "blocked_user_cache_cleanup_interval_seconds должен быть целым неотрицательным числом"
-            )
-        if not isinstance(self.max_failed_login_events, int) or \
-                self.max_failed_login_events < 1:
-            raise ValueError(
-                "max_failed_login_events должен быть целым положительным числом"
-            )
-        if not isinstance(self.max_blocked_users_cache_size, int) or \
-                self.max_blocked_users_cache_size < 1:
-            raise ValueError(
-                "max_blocked_users_cache_size должен быть целым положительным числом"
-            )
-
-        # Конфигурация базы данных MSSQL
-        database = config_data.get('database', {})
-        self.db_server = database.get('server', 'localhost')
-        self.db_port = database.get('port', 1433)
-        self.db_name = database.get('database', 'master')
-        self.db_username = database.get('username', '')
-        self.db_password = database.get('password', '')
-        self.db_driver = database.get('driver', 'ODBC Driver 18 for SQL Server')
-        self.db_connection_timeout = database.get('connection_timeout', 10)
-        self.allow_start_without_db = database.get('allow_start_without_db', False)
-        self.select_top = database.get('select_top', 1000)
-
-        # Параметры управления соединением
-        connection_pooling = database.get('connection_pooling', {})
-        self.db_pooling_enabled = connection_pooling.get('enabled', True)
-        self.db_max_pool_size = connection_pooling.get('max_pool_size', 10)
-        self.db_min_pool_size = connection_pooling.get('min_pool_size', 1)
-        self.db_connection_lifetime = connection_pooling.get('connection_lifetime', 300)
-
-        health_check = database.get('health_check', {})
-        self.db_health_check_enabled = health_check.get('enabled', True)
-        self.db_health_check_interval = health_check.get('interval_seconds', 300)
-
-        # Конфигурация логирования
-        logging_config = config_data.get('logging', {})
-        self.log_to_db = logging_config.get('log_to_db', [])
-        if isinstance(self.log_to_db, bool):
-            self.log_to_db = ['INFO', 'ERROR'] if self.log_to_db else []
-        elif not isinstance(self.log_to_db, list):
-            self.log_to_db = []
-
-        self.log_to_file = logging_config.get('log_to_file', [])
-        if isinstance(self.log_to_file, bool):
-            self.log_to_file = ['INFO', 'ERROR'] if self.log_to_file else []
-        elif not isinstance(self.log_to_file, list):
-            self.log_to_file = []
-
-        self.log_file_path = logging_config.get('log_file_path', 'server.log')
-        self.mask_sensitive_data = logging_config.get('mask_sensitive_data', True)
-
-        # Конфигурация CORS
-        cors = config_data.get('cors', {})
-        self.cors_enabled = cors.get('enabled', True)
-        self.cors_allowed_origins = cors.get('allowed_origins', ['*'])
-        self.cors_allowed_methods = cors.get('allowed_methods', ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
-        self.cors_allowed_headers = cors.get('allowed_headers', ['Content-Type', 'Token', 'Signature'])
-        self.cors_expose_headers = cors.get('expose_headers', [])
-        self.cors_allow_credentials = cors.get('allow_credentials', False)
-        self.cors_max_age = cors.get('max_age', 600)
-
-        # Конфигурация облачного хранилища
-        cloud_config = config_data.get('cloud', {})
-        self.cloud_enabled = cloud_config.get('enabled', False)
-        self.cloud_url = cloud_config.get('url', '')
-        self.cloud_username = cloud_config.get('username', '')
-        self.cloud_password = cloud_config.get('password', '')
-        self.cloud_repo_id = cloud_config.get('repo_id', '')
-        self.cloud_upload_path = cloud_config.get('upload_path', 'preview')
-        self.cloud_timeout = cloud_config.get('timeout', 30)
-        self.cloud_temp_dir = cloud_config.get('temp_dir', '/tmp/cloud_uploads')
-        self.allow_start_without_cloud = cloud_config.get('allow_start_without_cloud', False)
-
-        # Максимальный размер загружаемого файла
-        self.max_upload_size = cloud_config.get('max_upload_size_mb', 10)
-
-
-    def get_endpoint_security_level(self, endpoint_path: str) -> str:
-        """
-        Название: get_endpoint_security_level
-        Назначение: Получение уровня безопасности для указанного эндпоинта
-        Описание: Определяет требуемый уровень безопасности для эндпоинта на основе конфигурации
-        Принцип работы: Нормализует путь эндпоинта и ищет соответствующее правило безопасности,
-                    проверяя сначала точное совпадение, затем родительские пути
-        Входящие параметры: endpoint_path - путь эндпоинта
-        Исходящие параметры: str - уровень безопасности ('token', 'signature', 'disabled', 'public') или None если правило не найдено
-        """
-        normalized_path = endpoint_path.strip('/').lower()
-
-        if verbose_mode:
-            print_status("INFO", f"Поиск уровня безопасности для пути: '{endpoint_path}' -> нормализован: '{normalized_path}'")
-            print_status("INFO", f"Доступные правила: {list(self.endpoint_security.keys())}")
-
-        if normalized_path in self.endpoint_security:
-            security_level = self.endpoint_security[normalized_path]
-            if verbose_mode:
-                print_status("INFO", f"Найдено точное совпадение: {security_level}")
-            return security_level
-
-        path_parts = normalized_path.split('/')
-        for i in range(len(path_parts) - 1, 0, -1):
-            parent_path = '/'.join(path_parts[:i])
-            if parent_path in self.endpoint_security:
-                security_level = self.endpoint_security[parent_path]
-                if verbose_mode:
-                    print_status("INFO", f"Найдено совпадение по родительскому пути '{parent_path}': {security_level}")
-                return security_level
-
-        if verbose_mode:
-            print_status("INFO", f"Правило не найдено, используется стандартная безопасность")
-        return None
-
-
-    def get_response_token(self, request_token: str = None) -> str:
-        """
-        Название: get_response_token
-        Назначение: Получение токена для использования в ответе сервера
-        Описание: Определяет какой токен использовать в заголовке Token ответа
-        Принцип работы: Если передан токен из запроса - использует его, иначе использует default_token_server или случайный из allowed_tokens
-        Входящие параметры: request_token - токен из входящего запроса (опционально)
-        Исходящие параметры: str - токен для использования в ответе
-        """
-        if request_token:
-            return request_token
-
-        if self.default_token_server and len(self.default_token_server) > 0:
-            return self.default_token_server
-
-        return next(iter(self.allowed_tokens))
-
-
-    def is_log_to_db_enabled(self) -> bool:
-        """Проверяет, включено ли вообще логирование в БД"""
-        return isinstance(self.log_to_db, list) and len(self.log_to_db) > 0
-
-
-    def is_log_to_file_enabled(self) -> bool:
-        """Проверяет, включено ли вообще логирование в файл"""
-        return isinstance(self.log_to_file, list) and len(self.log_to_file) > 0
     
+    def is_log_to_db_enabled(self) -> bool:
+        """
+        Проверяет, включено ли вообще логирование в БД
+        """
+        return isinstance(self.log_to_db, list) and len(self.log_to_db) > 0
+
+    def is_log_to_file_enabled(self) -> bool:
+        """
+        Проверяет, включено ли вообще логирование в файл
+        """
+        return isinstance(self.log_to_file, list) and len(self.log_to_file) > 0    
+
 
 # Глобальные объекты
 config: Optional[Config] = None
@@ -3154,58 +2513,145 @@ async def db_setpayment(data: str) -> bool:
         raise
 
 
-async def db_login(phone: str, hashed_password: str) -> Dict[str, Any]:
+async def db_login(phone: str, password: str) -> Optional[Dict[str, Any]]:
     """
     Название: db_login
-    Назначение: Выполнение авторизации пользователя через хранимую процедуру БД.
-    Описание: Вызывает dbo.USR_Select_ID в неизменной сигнатуре, анализирует совместимые форматы
-              ответа БД и возвращает нормализованный результат для get_login. При ответе о блокировке
-              рассчитывает локальное время окончания блокировки и восстанавливает in-memory запись.
-    Принцип работы:
-      1. Вызывает dbo.USR_Select_ID только с параметрами телефона и хеша пароля.
-      2. Распознает успешную авторизацию, неверные учетные данные и новый JSON-ответ о блокировке.
-      3. При блокировке вычисляет смещение времени между БД и ПБД.
-      4. Пересчитывает blocked_until в локальное время ПБД.
-      5. Создает или обновляет in-memory запись блокировки.
+    Назначение: Аутентификация пользователя по телефону и паролю через хранимую процедуру
+    Описание: Вызывает хранимую процедуру USR_Select_ID для проверки логина и пароля.
+              Если процедура вернула -1, дополнительно проверяет USR_xDel,
+              чтобы различить блокировку пользователя и неверные учетные данные.
+    Принцип работы: Нормализует телефон, вызывает процедуру с параметрами phone и password.
     Входящие параметры:
-      phone - нормализованный телефон пользователя.
-      hashed_password - SHA-256 хеш пароля пользователя.
-    Исходящие параметры:
-      dict - словарь результата с полями status, data, message и дополнительными данными по блокировке.
+        phone - номер телефона пользователя
+        password - пароль пользователя
+    Исходящие параметры: Dict[str, Any] - результат аутентификации
     """
-    result = await execute_usr_select_id(phone, hashed_password)
+    if not db_connection:
+        raise Exception("База данных не доступна")
 
-    if isinstance(result, list) and result:
-        first_item = result[0]
-        if isinstance(first_item, dict):
-            return {'status': 'success', 'data': first_item}
+    normalized_phone = normalize_phone(phone)
+    if not normalized_phone:
+        return {"status": "invalid_credentials"}
 
-    if result == -1 or result == [] or result is None:
-        return {'status': 'invalid_credentials', 'message': 'Неверный телефон или пароль'}
+    try:
+        query = "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?"
 
-    if isinstance(result, dict) and result.get('status') == 'blocked':
-        normalized_phone = normalize_phone(phone)
-        local_blocked_until, offset_seconds = calculate_local_blocked_until(
-            result.get('blocked_until'),
-            result.get('db_current_timestamp')
-        )
-        register_user_block(
-            normalized_phone=normalized_phone,
-            user_id=None,
-            blocked_until_local=local_blocked_until,
-            source='db_login',
-            db_current_timestamp=result.get('db_current_timestamp'),
-            db_blocked_until=result.get('blocked_until'),
-            db_time_offset_seconds=offset_seconds,
-        )
-        return {
-            'status': 'blocked',
-            'message': result.get('message', 'Пользователь заблокирован'),
-            'blocked_until': local_blocked_until.isoformat() if local_blocked_until else None,
-            'server_time': datetime.now().isoformat(),
-        }
+        cursor = db_connection.cursor()
+        cursor.execute("SET LOCK_TIMEOUT 30000")
+        cursor.execute(query, (normalized_phone, password))
 
-    return {'status': 'error', 'message': 'Неизвестный формат ответа БД'}
+        result = cursor.fetchval()
+        db_connection.commit()
+        cursor.close()
+
+        if result is None:
+            return {"status": "invalid_credentials"}
+
+        result_str = str(result).strip()
+
+        # Совместимость: если процедура когда-либо начнёт возвращать -2,
+        # трактуем это как блокировку пользователя.
+        if result_str == "-2":
+            return {"status": "blocked"}
+
+        if result_str == "-1":
+            # USR_Select_ID возвращает -1 в нескольких случаях:
+            # 1) неверный пароль,
+            # 2) превышен лимит неудачных попыток,
+            # 3) пользователь скрыт процедурой из-за USR_xDel = 1.
+            # Чтобы не путать блокировку с неверным паролем,
+            # дополнительно проверяем статус пользователя напрямую в USR.
+            try:
+                cursor2 = db_connection.cursor()
+                cursor2.execute("SET LOCK_TIMEOUT 10000")
+
+                cursor2.execute(
+                    "SELECT COUNT(*) FROM [dbo].[USR] (nolock) "
+                    "WHERE USR_Phone = ? AND (USR_xDel IS NULL OR USR_xDel = 0)",
+                    normalized_phone
+                )
+                active_count_row = cursor2.fetchone()
+                active_count = active_count_row[0] if active_count_row and active_count_row[0] is not None else 0
+
+                cursor2.execute(
+                    "SELECT COUNT(*) FROM [dbo].[USR] (nolock) "
+                    "WHERE USR_Phone = ? AND USR_xDel = 1",
+                    normalized_phone
+                )
+                blocked_count_row = cursor2.fetchone()
+                blocked_count = blocked_count_row[0] if blocked_count_row and blocked_count_row[0] is not None else 0
+                cursor2.close()
+
+                if verbose_mode:
+                    print_status(
+                        "INFO",
+                        "Проверка статуса пользователя после USR_Select_ID = -1",
+                        f"phone: {normalized_phone}, active_count: {active_count}, blocked_count: {blocked_count}"
+                    )
+
+                # Для текущей модели БД USR_xDel = 1 трактуется как блокировка/деактивация.
+                # Если по телефону существует хотя бы одна заблокированная запись,
+                # возвращаем блокировку, чтобы не смешивать это состояние с неверным паролем.
+                if blocked_count > 0:
+                    if verbose_mode:
+                        print_status(
+                            "WARNING",
+                            "Пользователь заблокирован по USR_xDel",
+                            f"phone: {normalized_phone}, active_count: {active_count}, blocked_count: {blocked_count}"
+                        )
+                    return {"status": "blocked"}
+
+            except Exception as check_err:
+                print_status(
+                    "ERROR",
+                    "Ошибка дополнительной проверки блокировки пользователя",
+                    f"phone: {normalized_phone}, error: {str(check_err)}"
+                )
+                try:
+                    cursor2.close()
+                except Exception:
+                    pass
+
+            return {"status": "invalid_credentials"}
+
+        if not isinstance(result, str):
+            return {"status": "error", "message": f"Неожиданный тип результата: {type(result).__name__}"}
+
+        parsed_data = json.loads(result)
+
+        if isinstance(parsed_data, list) and len(parsed_data) > 0:
+            user_data = parsed_data[0]
+            user_id = user_data.get('id', user_data.get('USR_Id', -1))
+            if user_id == -1:
+                return {"status": "invalid_credentials"}
+            return {"status": "success", "data": user_data}
+
+        return {"status": "error", "message": "Неверный формат ответа USR_Select_ID"}
+
+    except json.JSONDecodeError:
+        return {"status": "error", "message": "USR_Select_ID вернула невалидный JSON"}
+    except pyodbc.OperationalError as e:
+        stre = str(e)
+        if "timeout" in stre.lower():
+            print_status("ERROR", "Таймаут БД в db_login", f"phone: {normalized_phone}, error: {stre}")
+            try:
+                db_connection.rollback()
+            except Exception:
+                pass
+            raise Exception(f"Таймаут БД: {stre}")
+        print_status("ERROR", "Ошибка БД в db_login", f"phone: {normalized_phone}, error: {stre}")
+        try:
+            db_connection.rollback()
+        except Exception:
+            pass
+        raise
+    except Exception as e:
+        print_status("ERROR", "Неожиданная ошибка в db_login", f"phone: {normalized_phone}, error: {str(e)}")
+        try:
+            db_connection.rollback()
+        except Exception:
+            pass
+        raise
 
 async def db_setdocument(user_id: int, name: str, extension: str, cloud_link: str, description: str = None) -> Dict[str, Any]:
     """
@@ -5206,7 +4652,6 @@ async def health_network(request: web.Request) -> web.Response:
             "GET /health/database",
             "GET /health/logging",
             "GET /health/network",
-            "GET /health/locked",            
             "POST /user/by-phone",
             "POST /user/update",
             "POST /user/mailing",
@@ -5365,52 +4810,6 @@ async def health_statistics(request: web.Request) -> web.Response:
     
     response = web.json_response(stat_data)
     await add_server_signature_to_response(response, getattr(request, 'authenticated_token', 'health_statistics'))
-    return response
-
-async def health_locked(request: web.Request) -> web.Response:
-    """
-    Название: health_locked
-    Назначение: Health-эндпоинт для получения списка активных блокировок пользователей в памяти
-    Описание: Возвращает JSON объект со списком пользователей, заблокированных в in-memory кэше blocked_users
-    Принцип работы: Читает глобальный кэш blocked_users, выбирает записи по ключам phone:*, исключает просроченные блокировки и формирует ответ
-    Входящие параметры:
-        request - объект HTTP запроса
-    Исходящие параметры: web.Response - JSON ответ с кодом статуса 200 и данными о заблокированных пользователях
-    """
-    now = datetime.now()
-    locked_items = []
-
-    async with blocked_users_lock:
-        expired_keys = []
-
-        for key, value in blocked_users.items():
-            blocked_until = value.get("blocked_until")
-            phone = value.get("phone")
-
-            if not blocked_until or blocked_until <= now:
-                expired_keys.append(key)
-                continue
-
-            if not key.startswith("phone:"):
-                continue
-
-            locked_items.append({
-                "phone": phone,
-                "blocked_until": blocked_until.strftime("%d.%m.%Y %H:%M")
-            })
-
-        for key in expired_keys:
-            blocked_users.pop(key, None)
-
-    response_data = {
-        "status": "healthy",
-        "count": len(locked_items),
-        "items": locked_items,
-        "timestamp": datetime.now().isoformat()
-    }
-
-    response = web.json_response(response_data, status=200)
-    await add_server_signature_to_response(response, getattr(request, 'authenticated_token', 'health_locked'))
     return response
 
 
@@ -5713,217 +5112,353 @@ async def get_user_by_phone(request: web.Request) -> web.Response:
 async def get_user_update(request: web.Request) -> web.Response:
     """
     Название: get_user_update
-    Назначение: POST /user/update — обновление данных пользователя.
-    Разрешён даже при активной блокировке (ТЗ §19.2).
-    После успешной смены пароля снимает блокировку.
+    Назначение: Эндпоинт для обновления данных пользователя с серверной подписью
     """
     try:
+        # Аутентификация по токену (с проверкой подписи клиента)
         token = await authenticate_request(request)
         if verbose_mode:
             print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
-
+        
+        # Парсим JSON тело запроса
         data = await request.json()
         if verbose_mode:
             print_status("INFO", f"Получены данные для обновления", str(data))
-
+        
+        # УНИВЕРСАЛЬНАЯ ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПАРАМЕТРОВ
         validation_result = validate_required_params(data, ['id'])
+        
         if validation_result['status'] == 'error':
             response = web.json_response(validation_result, status=200)
             if verbose_mode:
-                print_status("ERROR", f"Ошибка валидации", validation_result['message'])
-            await add_server_signature_to_response(response, token)
-            return response
-
-        user_id = data['id']
-        email = data.get('email', '')
-        password = data.get('password', '')
-
-        user_exists = await db_userid(user_id)
-        if not user_exists:
-            raise Exception(f"Пользователь с ID {user_id} не найден")
-
-        if verbose_mode:
-            print_status("INFO", f"Обновление пользователя", f"ID={user_id}, email={email}")
-
-        try:
-            user_id_int = int(user_id)
-        except (ValueError, TypeError):
-            response = web.json_response(
-                {"status": "error", "message": "Параметр id должен быть числом"},
-                status=200
-            )
-            await add_server_signature_to_response(response, token)
-            return response
-
-        hashed_password_for_db = ""
-        if password:
-            hashed_password_for_db = hash_password(password)
-            if verbose_mode:
-                print_status("INFO", f"Пароль хеширован", f"len={len(hashed_password_for_db)}")
-
-        update_success = await db_user_update(user_id_int, email, hashed_password_for_db)
-
-        if update_success:
-            if password:
-                # Снимаем блокировку после смены пароля (ТЗ §19.2)
-                await clear_block(user_id=user_id_int)
-                if verbose_mode:
-                    print_status("OK", "Блокировка снята после смены пароля", f"uid={user_id_int}")
-                if file_logger:
-                    file_logger.info(
-                        f"[BLOCK] BLOCK_CLEARED_ON_PASSWORD_CHANGE uid={user_id_int}"
-                    )
-                asyncio.create_task(log_to_database({
-                    "request_id": getattr(request, 'request_id', str(uuid.uuid4())),
-                    "endpoint": request.path,
-                    "params": f"uid={user_id_int}",
-                    "processing_time": 0,
-                    "response_code": 200,
-                    "message": "BLOCK_CLEARED_PASSWORD_CHANGED"
-                }))
-
-            response = web.json_response({
-                "status": "success",
-                "message": "Данные пользователя успешно обновлены"
-            }, status=200)
-
-            if verbose_mode:
-                print_status("OK", f"Пользователь {user_id} успешно обновлён")
+                print_status("ERROR", f"Ошибка валидации параметров", validation_result['message'])
         else:
-            response = web.json_response({
-                "status": "error",
-                "message": "Пользователь не найден или ошибка обновления"
-            }, status=200)
+            user_id = data['id']
+            email = data.get('email', '')
+            password = data.get('password', '')
+
+            # ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЛЬЗОВАТЕЛЯ
+            user_exists = await db_userid(user_id)
+            if not user_exists:
+                raise Exception(f"Пользователь с ID {user_id} не найден")            
 
             if verbose_mode:
-                print_status("ERROR", f"Ошибка обновления {user_id}")
-
+                print_status("INFO", f"Обновление пользователя", f"ID: {user_id}, Email: {email}")
+            
+            # Проверяем что ID является числом
+            try:
+                user_id_int = int(user_id)
+            except (ValueError, TypeError):
+                response_data = {
+                    "status": "error",
+                    "message": "Параметр id должен быть числом"
+                }
+                response = web.json_response(response_data, status=200)
+                if verbose_mode:
+                    print_status("ERROR", f"Неверный формат ID пользователя", user_id)
+            else:
+                # Хешируем пароль если он предоставлен (БЕЗ СОЛИ)
+                hashed_password_for_db = ""
+                if password:
+                    # Простое хеширование пароля без соли
+                    hashed_password_for_db = hash_password(password)
+                    if verbose_mode:
+                        print_status("INFO", f"Пароль хеширован", f"длина хеша: {len(hashed_password_for_db)}")
+                else:
+                    if verbose_mode:
+                        print_status("INFO", f"Пароль не предоставлен для обновления")
+                
+                # Обновляем пользователя в базе данных с хешированным паролем
+                update_success = await db_user_update(user_id_int, email, hashed_password_for_db)
+                
+                if update_success:
+                    response_data = {
+                        "status": "success",
+                        "message": "Данные пользователя успешно обновлены"
+                    }
+                    response = web.json_response(response_data, status=200)
+                    if verbose_mode:
+                        print_status("OK", f"Пользователь {user_id} успешно обновлен")
+                else:
+                    response_data = {
+                        "status": "error", 
+                        "message": "Пользователь не найден или ошибка обновления"
+                    }
+                    response = web.json_response(response_data, status=200)
+                    if verbose_mode:
+                        print_status("ERROR", f"Пользователь с ID {user_id} не найден (USR_Id = -1)")
+        
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
         await add_server_signature_to_response(response, token)
         if verbose_mode:
-            print_status("OK", f"Добавлена серверная подпись")
-
+            print_status("OK", f"Добавлена серверная подпись к ответу")
+        
         return response
-
+        
     except Exception as e:
-        response = web.json_response({
+        # Обработка неожиданных ошибок
+        error_message = f"Внутренняя ошибка сервера: {str(e)}"
+        response_data = {
             "status": "error",
-            "message": f"Внутренняя ошибка сервера: {str(e)}"
-        }, status=200)
-
+            "message": error_message
+        }
+        response = web.json_response(response_data, status=200)
+        
         try:
-            await add_server_signature_to_response(response, getattr(request, 'token', ''))
-        except Exception:
+            token = getattr(request, 'token', '')
+            await add_server_signature_to_response(response, token)
+        except:
             pass
-
+            
         if verbose_mode:
             print_status("ERROR", f"Неожиданная ошибка в get_user_update", str(e))
-
+        
         return response
+
 
 
 
 async def get_tickets(request: web.Request) -> web.Response:
     """
     Название: get_tickets
-    Назначение: POST /ticket/list — список залоговых билетов пользователя.
-    Заблокированным пользователям доступ запрещён (ТЗ §19.3).
+    Назначение: Эндпоинт для получения списка залоговых билетов пользователя с серверной подписью
+    Описание: Принимает user_id и опциональный status, возвращает список залоговых билетов с подписью сервера
+    Принцип работы: Проверяет входные данные, получает залоговые билеты из БД, формирует ответ с подписью
+    Входящие параметры: request - HTTP запрос с JSON телом содержащим user_id и опционально status
+    Исходящие параметры: web.Response - JSON ответ с кодом статуса, данными залоговых билетов и подписью сервера
     """
     try:
+        # Аутентификация по токену (с проверкой подписи клиента)
         token = await authenticate_request(request)
         if verbose_mode:
             print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
-
+        
+        # Парсим JSON тело запроса
         data = await request.json()
         if verbose_mode:
             print_status("INFO", f"Получены данные для получения залоговых билетов", str(data))
-
+        
+        # УНИВЕРСАЛЬНАЯ ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПАРАМЕТРОВ
         validation_result = validate_required_params(data, ['user_id'])
+        
         if validation_result['status'] == 'error':
+            # ВОЗВРАЩАЕМ ОТВЕТ В ЕДИНОМ СТАНДАРТЕ С КОДОМ 200
             response = web.json_response(validation_result, status=200)
             if verbose_mode:
-                print_status("ERROR", f"Ошибка валидации", validation_result['message'])
-            await add_server_signature_to_response(response, token)
-            return response
-
-        user_id = data['user_id']
-        status_filter = data.get('status', '')
-
-        # Централизованная проверка блокировки (ТЗ §19.3)
-        block_resp = await _block_guard(user_id=user_id)
-        if block_resp is not None:
-            await add_server_signature_to_response(block_resp, token)
-            return block_resp
-
-        user_exists = await db_userid(user_id)
-        if not user_exists:
-            raise Exception(f"Пользователь с ID {user_id} не найден")
-
-        if verbose_mode:
-            print_status(
-                "INFO",
-                f"Поиск залоговых билетов",
-                f"user_id={user_id}" + (f", status={status_filter}" if status_filter else "")
-            )
-
-        tickets = await db_tickets(user_id, status_filter)
-
-        if verbose_mode:
-            print_status("INFO", f"Получено билетов из БД", str(len(tickets)))
-
-        if not tickets:
-            response_data = {
-                "status": "error",
-                "message": f"Залоговые билеты не найдены для пользователя {user_id}" +
-                           (f" со статусом {status_filter}" if status_filter else "")
-            }
+                print_status("ERROR", f"Ошибка валидации параметров", validation_result['message'])
         else:
-            response_data = {
-                "status": "success",
-                "tickets": tickets
-            }
+            user_id = data['user_id']
+            status = data.get('status', '')  # Опциональный параметр, по умолчанию пустая строка
+
+            # ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЛЬЗОВАТЕЛЯ
+            user_exists = await db_userid(user_id)
+            if not user_exists:
+                # Если пользователя нет, вызываем исключение для обработки в блоке except Exception as e:
+                raise Exception(f"Пользователь с ID {user_id} не найден")        
+            
             if verbose_mode:
-                print_status("OK", f"Успешно возвращено билетов", str(len(tickets)))
+                if status:
+                    print_status("INFO", f"Поиск залоговых билетов пользователя", f"user_id: {user_id}, status: {status}")
+                else:
+                    print_status("INFO", f"Поиск всех залоговых билетов пользователя", f"user_id: {user_id}")
+            
 
-        response = web.json_response(response_data, status=200)
+            # Получаем залоговые билеты из базы данных
+            tickets = await db_tickets(user_id, status)
+            
+            if verbose_mode:
+                print_status("INFO", f"Получено залоговых билетов из БД", str(len(tickets)))
+                
+                # Дополнительная информация для отладки
+                if tickets:
+                    print(f"  Пример залогового билета: {tickets[0].get('external_id', 'N/A')} - {tickets[0].get('status', 'N/A')}")
+                    if 'items' in tickets[0]:
+                        print(f"  Количество предметов в первом залоговом билете: {len(tickets[0]['items'])}")
+            
+            # Проверяем, найдены ли залоговые билеты
+            if not tickets:
+                # Залоговые билеты не найдены - возвращаем ошибку
+                response_data = {
+                    "status": "error",
+                    "message": f"Залоговые билеты не найдены для пользователя {user_id}" + (f" со статусом {status}" if status else "")
+                }
+                response = web.json_response(response_data, status=200)
+                if verbose_mode:
+                    print_status("INFO", f"Залоговые билеты не найдены, возвращаем ошибку")
+            else:
+                # Залоговые билеты найдены - возвращаем успешный ответ
+                response_data = {
+                    "status": "success",
+                    "tickets": tickets
+                }
+                response = web.json_response(response_data)
+                if verbose_mode:
+                    print_status("OK", f"Успешно возвращено залоговых билетов", str(len(tickets)))
+        
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
         await add_server_signature_to_response(response, token)
-
         if verbose_mode:
-            print_status("OK", f"Добавлена серверная подпись")
-
+            print_status("OK", f"Добавлена серверная подпись к ответу")
+        
         return response
-
+        
     except web.HTTPException as he:
-        response = web.json_response({
+        # Перехватываем HTTP исключения (403, 404 и т.д.) и добавляем подпись
+        response_data = {
             "status": "error",
             "message": he.text
-        }, status=he.status)
+        }
+        response = web.json_response(response_data, status=he.status)
+        if verbose_mode:
+            print_status("ERROR", f"HTTP исключение в get_tickets",
+                        data_lines=[
+                            f"Статус: {he.status}",
+                            f"Текст: {he.text}"
+                        ])
         await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
         return response
-
     except json.JSONDecodeError as e:
-        response = web.json_response({
+        if verbose_mode:
+            print_status("ERROR", f"Ошибка декодирования JSON", str(e))
+        response_data = {
             "status": "error",
-            "message": "Невалидный JSON"
-        }, status=200)
+            "message": "Невалидный JSON в теле запроса"
+        }
+        response = web.json_response(response_data, status=200)
+        
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
         auth_header = request.headers.get("Token", "")
-        tok = auth_header[7:] if auth_header.startswith("Bearer ") else "json_error"
-        await add_server_signature_to_response(response, tok)
+        token_for_signature = "json_error"
+        if auth_header.startswith("Bearer "):
+            token_for_signature = auth_header[7:]
+        await add_server_signature_to_response(response, token_for_signature)
+        
         return response
-
     except Exception as e:
         if verbose_mode:
-            print_status("ERROR", f"Ошибка в get_tickets", str(e))
-
-        response = web.json_response({
+            print_status("ERROR", f"Неожиданная ошибка в get_tickets", str(e))
+            import traceback
+            traceback.print_exc()
+        response_data = {
             "status": "error",
             "message": f"Ошибка при получении залоговых билетов: {str(e)}"
-        }, status=200)
-
+        }
+        response = web.json_response(response_data, status=200)
+        
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
         auth_header = request.headers.get("Token", "")
-        tok = auth_header[7:] if auth_header.startswith("Bearer ") else "unexpected_error"
-        await add_server_signature_to_response(response, tok)
+        token_for_signature = "unexpected_error"
+        if auth_header.startswith("Bearer "):
+            token_for_signature = auth_header[7:]
+        await add_server_signature_to_response(response, token_for_signature)
+        
         return response
-    
+        
+    except web.HTTPException as he:
+        # Перехватываем HTTP исключения (403, 404 и т.д.) и добавляем подпись
+        response_data = {
+            "status": "error",
+            "message": he.text
+        }
+        response = web.json_response(response_data, status=he.status)
+        if verbose_mode:
+            print_status("ERROR", f"HTTP исключение в get_tickets",
+                        data_lines=[
+                            f"Статус: {he.status}",
+                            f"Текст: {he.text}"
+                        ])
+        await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
+        return response
+    except json.JSONDecodeError as e:
+        if verbose_mode:
+            print_status("ERROR", f"Ошибка декодирования JSON", str(e))
+        response_data = {
+            "status": "error",
+            "message": "Невалидный JSON в теле запроса"
+        }
+        response = web.json_response(response_data, status=200)
+        
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
+        auth_header = request.headers.get("Token", "")
+        token_for_signature = "json_error"
+        if auth_header.startswith("Bearer "):
+            token_for_signature = auth_header[7:]
+        await add_server_signature_to_response(response, token_for_signature)
+        
+        return response
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", f"Неожиданная ошибка в get_tickets", str(e))
+            import traceback
+            traceback.print_exc()
+        response_data = {
+            "status": "error",
+            "message": f"Ошибка при получении тикетов: {str(e)}"
+        }
+        response = web.json_response(response_data, status=200)
+        
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
+        auth_header = request.headers.get("Token", "")
+        token_for_signature = "unexpected_error"
+        if auth_header.startswith("Bearer "):
+            token_for_signature = auth_header[7:]
+        await add_server_signature_to_response(response, token_for_signature)
+        
+        return response
+        
+    except web.HTTPException as he:
+        # Перехватываем HTTP исключения (403, 404 и т.д.) и добавляем подпись
+        response_data = {
+            "status": "error",
+            "message": he.text
+        }
+        response = web.json_response(response_data, status=he.status)
+        if verbose_mode:
+            print_status("ERROR", f"HTTP исключение в get_tickets",
+                        data_lines=[
+                            f"Статус: {he.status}",
+                            f"Текст: {he.text}"
+                        ])
+        await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
+        return response
+    except json.JSONDecodeError as e:
+        if verbose_mode:
+            print_status("ERROR", f"Ошибка декодирования JSON", str(e))
+        response_data = {
+            "status": "error",
+            "message": "Невалидный JSON в теле запроса"
+        }
+        response = web.json_response(response_data, status=200)
+        
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
+        auth_header = request.headers.get("Token", "")
+        token_for_signature = "json_error"
+        if auth_header.startswith("Bearer "):
+            token_for_signature = auth_header[7:]
+        await add_server_signature_to_response(response, token_for_signature)
+        
+        return response
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", f"Неожиданная ошибка в get_tickets", str(e))
+            import traceback
+            traceback.print_exc()
+        response_data = {
+            "status": "error",
+            "message": f"Ошибка при получении тикетов: {str(e)}"
+        }
+        response = web.json_response(response_data, status=200)
+        
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
+        auth_header = request.headers.get("Token", "")
+        token_for_signature = "unexpected_error"
+        if auth_header.startswith("Bearer "):
+            token_for_signature = auth_header[7:]
+        await add_server_signature_to_response(response, token_for_signature)
+        
+        return response
+
+
 async def get_setpayment(request: web.Request) -> web.Response:
     """
     Название: get_setpayment
@@ -6067,197 +5602,140 @@ async def get_setpayment(request: web.Request) -> web.Response:
 async def get_login(request: web.Request) -> web.Response:
     """
     Название: get_login
-    Назначение: POST /user/login — аутентификация пользователя.
-    Коды: 1=неверные данные, 2=заблокирован, 3=успех.
-    HTTP 200 всегда (ТЗ §9).
-    Per-user lock: один запрос за раз на телефон (ТЗ §13).
-    In-memory check: при активной блокировке не идём в БД (ТЗ §11, §19.1).
+    Назначение: Эндпоинт для аутентификации пользователя по телефону и паролю.
+                Варианты code:
+                  1 – неверный телефон или пароль / превышен лимит попыток
+                  2 – пользователь заблокирован
+                  3 – успешная аутентификация
+    Примечание: HTTP-статус всегда 200 для совместимости с фронтом.
+                При блокировке: status = "error", error_code = "USER_BLOCKED".
+                При неверных данных: status = "error", error_code = "INVALID_CREDENTIALS".
     """
-    token = "unexpected_error"
-
     try:
+        # Аутентификация по токену (с проверкой подписи клиента)
         token = await authenticate_request(request)
         if verbose_mode:
             print_status("OK", "Аутентификация пройдена", f"токен {token[:8]}...")
 
+        # Парсим JSON тело запроса
         data = await request.json()
+        if verbose_mode:
+            print_status("INFO", "Получены данные для аутентификации", str(data))
 
+        # УНИВЕРСАЛЬНАЯ ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПАРАМЕТРОВ
         validation_result = validate_required_params(data, ['phone', 'password'])
+
         if validation_result['status'] == 'error':
             response = web.json_response(validation_result, status=200)
             if verbose_mode:
-                print_status("ERROR", "Ошибка валидации", validation_result['message'])
-            await add_server_signature_to_response(response, token)
-            return response
+                print_status("ERROR", "Ошибка валидации параметров", validation_result['message'])
+        else:
+            phone = data['phone']
+            password = data['password']
 
-        phone = data['phone']
-        password = data['password']
-        normalized_phone = normalize_phone(phone) or phone
+            if verbose_mode:
+                print_status("INFO", "Аутентификация пользователя", f"phone: {phone}")
 
-        if verbose_mode:
-            print_status("INFO", "Запрос авторизации /user/login", f"phone={normalized_phone}")
-
-        if file_logger:
-            file_logger.info(f"[LOGIN] REQUEST phone={normalized_phone}")
-
-        user_lock = await get_user_lock(normalized_phone)
-
-        async with user_lock:
-            # Проверка in-memory кэша (ТЗ §11 — без обращения в БД)
-            bc = await check_user_blocked(phone=normalized_phone)
-            if bc['blocked']:
-                bu = bc['blocked_until']
-
-                if verbose_mode:
-                    print_status(
-                        "INFO",
-                        "Отказ: активная блокировка (in-memory)",
-                        f"phone={normalized_phone} until={bu.isoformat()}"
-                    )
-
-                if file_logger:
-                    file_logger.info(
-                        f"[LOGIN] BLOCKED_INMEMORY phone={normalized_phone} "
-                        f"until={bu.isoformat()}"
-                    )
-
-                asyncio.create_task(log_to_database({
-                    "request_id": getattr(request, 'request_id', str(uuid.uuid4())),
-                    "endpoint": request.path,
-                    "params": f"phone={normalized_phone}",
-                    "processing_time": 0,
-                    "response_code": 200,
-                    "message": "USER_BLOCKED_INMEMORY"
-                }))
-
-                response = web.json_response(_make_blocked_response(bu), status=200)
-                await add_server_signature_to_response(response, token)
-                return response
-
+            # Шаг 1: хешируем пароль для сравнения с хешем в БД
             hashed_password = hash_password(password)
             if verbose_mode:
-                print_status("INFO", "Пароль хеширован", f"len={len(hashed_password)}")
+                print_status("INFO", "Пароль хеширован для проверки",
+                             f"длина хеша: {len(hashed_password)}")
 
+            # Шаг 2: вызываем USR_Select_ID через db_login
             login_result = await db_login(phone, hashed_password)
+
             status = login_result.get("status")
             user_data = login_result.get("data")
 
-            if status in ("blocked", "locked"):
-                bu = login_result.get('blocked_until', datetime.now() + timedelta(hours=1))
-                if not isinstance(bu, datetime):
-                    try:
-                        bu = datetime.fromisoformat(str(bu))
-                    except Exception:
-                        bu = datetime.now() + timedelta(hours=1)
-
-                if verbose_mode:
-                    print_status(
-                        "ERROR",
-                        "Пользователь заблокирован (ответ БД)",
-                        f"phone={normalized_phone}"
-                    )
-
-                if file_logger:
-                    file_logger.info(
-                        f"[LOGIN] BLOCKED_BY_DB phone={normalized_phone} "
-                        f"until={bu.isoformat()}"
-                    )
-
+            if status == "blocked" or status == "locked":
+                # Пользователь заблокирован. locked оставлен для обратной совместимости.
                 asyncio.create_task(log_to_database({
                     "request_id": getattr(request, 'request_id', str(uuid.uuid4())),
                     "endpoint": request.path,
-                    "params": f"phone={normalized_phone}",
+                    "params": f"phone={phone}",
                     "processing_time": 0,
                     "response_code": 200,
                     "message": "USER_BLOCKED_LOGIN"
                 }))
-
-                response = web.json_response(_make_blocked_response(bu), status=200)
-
-            elif status == "invalid_credentials":
-                await register_failed_attempt(normalized_phone)
-
+                response_data = {
+                    "status": "error",
+                    "code": 2,
+                    "error_code": "USER_BLOCKED",
+                    "message": "Пользователь заблокирован. Обратитесь в поддержку."
+                }
+                response = web.json_response(response_data, status=200)
                 if verbose_mode:
-                    print_status("INFO", "Неверные учётные данные", f"phone={normalized_phone}")
-
-                if file_logger:
-                    file_logger.info(f"[LOGIN] INVALID_CREDENTIALS phone={normalized_phone}")
-
-                response = web.json_response({
+                    print_status("ERROR", "Доступ запрещён — пользователь заблокирован",
+                                 f"phone: {phone}")
+            elif status == "invalid_credentials":
+                # Неверный телефон или пароль (USR_Select_ID вернул -1 или пусто)
+                response_data = {
                     "status": "error",
                     "code": 1,
-                    "errorcode": "INVALID_CREDENTIALS",
+                    "error_code": "INVALID_CREDENTIALS",
                     "message": "Неверный телефон или пароль"
-                }, status=200)
-
+                }
+                response = web.json_response(response_data, status=200)
+                if verbose_mode:
+                    print_status("INFO",
+                                 "Аутентификация не удалась (invalid_credentials)",
+                                 f"phone: {phone}")
             elif status == "success":
-                uid = None
-                if isinstance(user_data, dict):
-                    uid = user_data.get('id') or user_data.get('USR_Id')
-
-                await clear_failed_attempts(normalized_phone)
-
-                # Синхронизируем phone→uid в кэше блокировок
-                if uid:
-                    async with blocked_users_lock:
-                        pk = f"phone:{normalized_phone}"
-                        uk = f"uid:{uid}"
-                        if pk in blocked_users and uk not in blocked_users:
-                            blocked_users[uk] = blocked_users[pk]
-
-                resp_data = {
+                # Успешная аутентификация
+                response_data = {
                     "status": "success",
                     "code": 3,
                     "data": user_data
                 }
 
+                # Фильтруем None значения из данных пользователя
                 if isinstance(user_data, dict):
-                    resp_data['data'] = {k: v for k, v in user_data.items() if v is not None}
+                    response_data['data'] = {k: v for k, v in user_data.items() if v is not None}
 
+                response = web.json_response(response_data, status=200)
                 if verbose_mode:
-                    print_status(
-                        "OK",
-                        "Аутентификация успешна",
-                        f"uid={uid if uid is not None else 'N/A'}"
-                    )
-
-                if file_logger:
-                    file_logger.info(f"[LOGIN] SUCCESS phone={normalized_phone} uid={uid}")
-
-                response = web.json_response(resp_data, status=200)
-
+                    user_id = None
+                    if isinstance(user_data, dict):
+                        user_id = user_data.get('id') or user_data.get('USR_Id')
+                    print_status("OK", "Аутентификация успешна",
+                                 f"user_id: {user_id if user_id is not None else 'N/A'}")
             else:
-                response = web.json_response({
+                # Неожиданная ошибка на уровне db_login / USR_Select_ID
+                response_data = {
                     "status": "error",
                     "message": login_result.get("message", "Ошибка при аутентификации")
-                }, status=200)
-
+                }
+                response = web.json_response(response_data, status=200)
                 if verbose_mode:
-                    print_status("ERROR", "Неожиданный статус db_login", str(login_result))
+                    print_status("ERROR",
+                                 "Неожиданное состояние login_result",
+                                 str(login_result))
 
         await add_server_signature_to_response(response, token)
-
         if verbose_mode:
-            print_status("OK", "Добавлена серверная подпись")
+            print_status("OK", "Добавлена серверная подпись к ответу")
 
         return response
 
     except Exception as e:
         if verbose_mode:
-            print_status("ERROR", "Ошибка в get_login", str(e))
+            print_status("ERROR", "Неожиданная ошибка в get_login", str(e))
 
-        response = web.json_response({
+        response_data = {
             "status": "error",
             "message": f"Ошибка при аутентификации: {str(e)}"
-        }, status=200)
+        }
+        response = web.json_response(response_data, status=200)
 
         auth_header = request.headers.get("Token", "")
+        token_for_signature = "unexpected_error"
         if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
+            token_for_signature = auth_header[7:]
+        await add_server_signature_to_response(response, token_for_signature)
 
-        await add_server_signature_to_response(response, token)
         return response
-    
+
 async def get_setdocument(request: web.Request) -> web.Response:
     """
     Название: get_setdocument
@@ -6695,15 +6173,15 @@ async def get_documentlist(request: web.Request) -> web.Response:
         token = await authenticate_request(request)
         if verbose_mode:
             print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
-
+        
         # Парсим JSON тело запроса
         data = await request.json()
         if verbose_mode:
             print_status("INFO", f"Получены данные для получения списка документов", str(data))
-
+        
         # УНИВЕРСАЛЬНАЯ ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПАРАМЕТРОВ
         validation_result = validate_required_params(data, ['user_id'])
-
+        
         if validation_result['status'] == 'error':
             # ВОЗВРАЩАЕМ ОТВЕТ В ЕДИНОМ СТАНДАРТЕ С КОДОМ 200
             response = web.json_response(validation_result, status=200)
@@ -6712,31 +6190,25 @@ async def get_documentlist(request: web.Request) -> web.Response:
         else:
             user_id = data['user_id']
 
-            # Централизованная проверка блокировки (ТЗ §19.3)
-            block_resp = await _block_guard(user_id=user_id)
-            if block_resp is not None:
-                await add_server_signature_to_response(block_resp, token)
-                return block_resp
-
             # ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЛЬЗОВАТЕЛЯ
             user_exists = await db_userid(user_id)
             if not user_exists:
-                raise Exception(f"Пользователь с ID {user_id} не найден")
-
+                raise Exception(f"Пользователь с ID {user_id} не найден")            
+            
             if verbose_mode:
                 print_status("INFO", f"Поиск документов пользователя", f"user_id: {user_id}")
-
+            
             # Получаем документы из базы данных
             documents = await db_documentlist(user_id)
-
+            
             if verbose_mode:
                 print_status("INFO", f"Получено документов из БД", str(len(documents)))
-
+                
                 # Дополнительная информация для отладки
                 if documents:
                     print(f"  Пример документа: {documents[0].get('id', 'N/A')} - {documents[0].get('name', 'N/A')}")
                     print(f"  Подписан: {documents[0].get('is_signed', False)}")
-
+            
             # Формируем успешный ответ
             if documents:
                 response_data = {
@@ -6746,20 +6218,20 @@ async def get_documentlist(request: web.Request) -> web.Response:
             else:
                 response_data = {
                     "status": "success",
-                    "items": []
+                    "items":[]
                 }
 
             response = web.json_response(response_data)
             if verbose_mode:
                 print_status("OK", f"Успешно возвращено документов", str(len(documents)))
-
+        
         # ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
         await add_server_signature_to_response(response, token)
         if verbose_mode:
             print_status("OK", f"Добавлена серверная подпись к ответу")
-
+        
         return response
-
+        
     except web.HTTPException as he:
         # Перехватываем HTTP исключения (403, 404 и т.д.) и добавляем подпись
         response_data = {
@@ -6775,7 +6247,6 @@ async def get_documentlist(request: web.Request) -> web.Response:
                         ])
         await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
         return response
-
     except json.JSONDecodeError as e:
         if verbose_mode:
             print_status("ERROR", f"Ошибка декодирования JSON", str(e))
@@ -6784,16 +6255,15 @@ async def get_documentlist(request: web.Request) -> web.Response:
             "message": "Невалидный JSON в теле запроса"
         }
         response = web.json_response(response_data, status=200)
-
+        
         # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
         auth_header = request.headers.get("Token", "")
         token_for_signature = "json_error"
         if auth_header.startswith("Bearer "):
             token_for_signature = auth_header[7:]
         await add_server_signature_to_response(response, token_for_signature)
-
+        
         return response
-
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", f"Неожиданная ошибка в get_documentlist", str(e))
@@ -6804,16 +6274,17 @@ async def get_documentlist(request: web.Request) -> web.Response:
             "message": f"Ошибка при получении списка документов: {str(e)}"
         }
         response = web.json_response(response_data, status=200)
-
+        
         # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
         auth_header = request.headers.get("Token", "")
         token_for_signature = "unexpected_error"
         if auth_header.startswith("Bearer "):
             token_for_signature = auth_header[7:]
         await add_server_signature_to_response(response, token_for_signature)
-
+        
         return response
-    
+
+
 
 async def get_useremailing(request: web.Request) -> web.Response:
     """
@@ -6829,15 +6300,15 @@ async def get_useremailing(request: web.Request) -> web.Response:
         token = await authenticate_request(request)
         if verbose_mode:
             print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
-
+        
         # Парсим JSON тело запроса
         data = await request.json()
         if verbose_mode:
             print_status("INFO", f"Получены данные для обновления согласия на рассылку", str(data))
-
+        
         # УНИВЕРСАЛЬНАЯ ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПАРАМЕТРОВ
         validation_result = validate_required_params(data, ['user_id', 'consent_to_mailing'])
-
+        
         if validation_result['status'] == 'error':
             # ВОЗВРАЩАЕМ ОТВЕТ В ЕДИНОМ СТАНДАРТЕ С КОДОМ 200
             response = web.json_response(validation_result, status=200)
@@ -6847,22 +6318,16 @@ async def get_useremailing(request: web.Request) -> web.Response:
             user_id = data['user_id']
             consent_to_mailing = data['consent_to_mailing']
 
-            # Централизованная проверка блокировки (ТЗ §19.3)
-            block_resp = await _block_guard(user_id=user_id)
-            if block_resp is not None:
-                await add_server_signature_to_response(block_resp, token)
-                return block_resp
-
             # ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЛЬЗОВАТЕЛЯ
             user_exists = await db_userid(user_id)
             if not user_exists:
-                raise Exception(f"Пользователь с ID {user_id} не найден")
-
+                raise Exception(f"Пользователь с ID {user_id} не найден")            
+            
             if verbose_mode:
                 consent_text = "согласие получено" if consent_to_mailing else "отказ от рассылки"
-                print_status("INFO", f"Обновление согласия на рассылку",
+                print_status("INFO", f"Обновление согласия на рассылку", 
                             f"user_id: {user_id}, статус: {consent_text}")
-
+            
             # Проверяем тип consent_to_mailing
             if not isinstance(consent_to_mailing, bool):
                 response_data = {
@@ -6887,7 +6352,7 @@ async def get_useremailing(request: web.Request) -> web.Response:
                 else:
                     # Обновляем согласие на рассылку в базе данных
                     update_success = await db_useremailing(user_id_int, consent_to_mailing)
-
+                    
                     if update_success:
                         response_data = {
                             "status": "success"
@@ -6897,20 +6362,20 @@ async def get_useremailing(request: web.Request) -> web.Response:
                             print_status("OK", f"Согласие на рассылку для пользователя {user_id} успешно обновлено")
                     else:
                         response_data = {
-                            "status": "error",
+                            "status": "error", 
                             "message": "Ошибка обновления согласия на рассылку. Пользователь не найден или ошибка в БД."
                         }
                         response = web.json_response(response_data, status=200)
                         if verbose_mode:
                             print_status("ERROR", f"Ошибка обновления согласия на рассылку для пользователя {user_id}")
-
+        
         # ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
         await add_server_signature_to_response(response, token)
         if verbose_mode:
             print_status("OK", f"Добавлена серверная подпись к ответу")
-
+        
         return response
-
+        
     except web.HTTPException as he:
         # Перехватываем HTTP исключения (403, 404 и т.д.) и добавляем подпись
         response_data = {
@@ -6926,7 +6391,6 @@ async def get_useremailing(request: web.Request) -> web.Response:
                         ])
         await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
         return response
-
     except json.JSONDecodeError as e:
         if verbose_mode:
             print_status("ERROR", f"Ошибка декодирования JSON", str(e))
@@ -6935,16 +6399,15 @@ async def get_useremailing(request: web.Request) -> web.Response:
             "message": "Невалидный JSON в теле запроса"
         }
         response = web.json_response(response_data, status=200)
-
+        
         # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
         auth_header = request.headers.get("Token", "")
         token_for_signature = "json_error"
         if auth_header.startswith("Bearer "):
             token_for_signature = auth_header[7:]
         await add_server_signature_to_response(response, token_for_signature)
-
+        
         return response
-
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", f"Неожиданная ошибка в get_useremailing", str(e))
@@ -6955,17 +6418,16 @@ async def get_useremailing(request: web.Request) -> web.Response:
             "message": f"Ошибка при обновлении согласия на рассылку: {str(e)}"
         }
         response = web.json_response(response_data, status=200)
-
+        
         # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
         auth_header = request.headers.get("Token", "")
         token_for_signature = "unexpected_error"
         if auth_header.startswith("Bearer "):
             token_for_signature = auth_header[7:]
         await add_server_signature_to_response(response, token_for_signature)
-
+        
         return response
-
-
+    
 # --- ОБРАБОТЧИК ЭНДПОИНТА ДЛЯ РАСЧЕТА РАСПРЕДЕЛЕНИЯ ПЛАТЕЖА ---
 
 async def get_payment_calculate_distribution(request: web.Request) -> web.Response:
@@ -6974,7 +6436,7 @@ async def get_payment_calculate_distribution(request: web.Request) -> web.Respon
     Назначение: Эндпоинт для расчета распределения платежа по залоговым билетам
     Описание: Принимает массив платежей, проверяет их валидность,
               передает в функцию db_calculate_payment_distribution и форматирует ответ
-    Принцип работы:
+    Принцип работы: 
         1. Проверяет валидность JSON формата
         2. Принимает как объект с полем 'payments' или как массив напрямую
         3. Передает строку в db_calculate_payment_distribution
@@ -6988,24 +6450,24 @@ async def get_payment_calculate_distribution(request: web.Request) -> web.Respon
         token = await authenticate_request(request)
         if verbose_mode:
             print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
-
+        
         # Получаем тело запроса как строку для проверки JSON валидности
         raw_body = await request.read()
-
+        
         # Шаг 1: Проверка валидности JSON формата
         try:
             # Пробуем декодировать и проверить структуру JSON
             json_str = raw_body.decode('utf-8')
             json_data = json.loads(json_str)
-
+            
             if verbose_mode:
                 print_status("OK", f"JSON валиден", f"длина: {len(json_str)} символов")
                 print(f"  Тип полученных данных: {type(json_data).__name__}")
-
+                
         except json.JSONDecodeError as e:
             if verbose_mode:
                 print_status("ERROR", f"Невалидный JSON в теле запроса", str(e))
-
+            
             response_data = {
                 "status": "error",
                 "message": f"Невалидный JSON формат: {str(e)}"
@@ -7013,11 +6475,10 @@ async def get_payment_calculate_distribution(request: web.Request) -> web.Respon
             response = web.json_response(response_data, status=200)
             await add_server_signature_to_response(response, token)
             return response
-
         except UnicodeDecodeError as e:
             if verbose_mode:
                 print_status("ERROR", f"Ошибка декодирования тела запроса", str(e))
-
+            
             response_data = {
                 "status": "error",
                 "message": "Тело запроса должно быть в UTF-8 кодировке"
@@ -7025,21 +6486,20 @@ async def get_payment_calculate_distribution(request: web.Request) -> web.Respon
             response = web.json_response(response_data, status=200)
             await add_server_signature_to_response(response, token)
             return response
-
+        
         # Шаг 2: Обработка разных форматов входных данных
         payments_data = None
-
+        
         if isinstance(json_data, list):
             # Если пришел массив напрямую - используем его как платежи
             if verbose_mode:
                 print_status("INFO", f"Получен массив платежей", f"количество: {len(json_data)}")
             payments_data = json_data
-
         elif isinstance(json_data, dict):
             # Если пришел объект - ищем поле 'payments'
             if 'payments' in json_data and isinstance(json_data['payments'], list):
                 if verbose_mode:
-                    print_status("INFO", f"Получен объект с полем 'payments'",
+                    print_status("INFO", f"Получен объект с полем 'payments'", 
                                f"количество: {len(json_data['payments'])}")
                 payments_data = json_data['payments']
             else:
@@ -7051,14 +6511,14 @@ async def get_payment_calculate_distribution(request: web.Request) -> web.Respon
                 else:
                     # Попробуем обработать объект как есть
                     if verbose_mode:
-                        print_status("INFO", f"Передаем объект как есть",
+                        print_status("INFO", f"Передаем объект как есть", 
                                    f"поля: {list(json_data.keys())}")
                     payments_data = json_data
         else:
             if verbose_mode:
-                print_status("ERROR", f"Неверный формат данных",
+                print_status("ERROR", f"Неверный формат данных", 
                            f"ожидался массив или объект, получен: {type(json_data).__name__}")
-
+            
             response_data = {
                 "status": "error",
                 "message": f"Неверный формат данных: ожидался массив или объект"
@@ -7066,108 +6526,78 @@ async def get_payment_calculate_distribution(request: web.Request) -> web.Respon
             response = web.json_response(response_data, status=200)
             await add_server_signature_to_response(response, token)
             return response
-
-        # Централизованная проверка блокировки (ТЗ §19.3), если user_id удалось извлечь
-        user_id = None
-        try:
-            if isinstance(json_data, dict):
-                user_id = json_data.get('user_id')
-
-                if user_id is None and isinstance(payments_data, list):
-                    for payment in payments_data:
-                        if isinstance(payment, dict) and payment.get('user_id') is not None:
-                            user_id = payment.get('user_id')
-                            break
-
-            elif isinstance(json_data, list):
-                for payment in json_data:
-                    if isinstance(payment, dict) and payment.get('user_id') is not None:
-                        user_id = payment.get('user_id')
-                        break
-        except Exception:
-            user_id = None
-
-        if user_id:
-            block_resp = await _block_guard(user_id=user_id)
-            if block_resp is not None:
-                await add_server_signature_to_response(block_resp, token)
-                return block_resp
-
-            user_exists = await db_userid(user_id)
-            if not user_exists:
-                raise Exception(f"Пользователь с ID {user_id} не найден")
-
+        
         # Шаг 3: Подготовка данных для передачи в БД
         try:
             if verbose_mode:
                 if isinstance(payments_data, list):
-                    print_status("INFO", f"Подготовка данных для передачи в БД",
+                    print_status("INFO", f"Подготовка данных для передачи в БД", 
                                f"количество платежей: {len(payments_data)}")
-                    for i, payment in enumerate(payments_data[:3]):
+                    for i, payment in enumerate(payments_data[:3]):  # Выводим первые 3 для отладки
                         print(f"  Платеж {i+1}: {payment.get('ticket_id', 'N/A')} - {payment.get('amount', 'N/A')}")
                 else:
-                    print_status("INFO", f"Подготовка данных для передачи в БД",
+                    print_status("INFO", f"Подготовка данных для передачи в БД", 
                                f"тип: {type(payments_data).__name__}")
-
+            
             # Конвертируем данные обратно в JSON строку для передачи в БД
             # Важно: передаем payments_data как есть, функция БД сама решит как обрабатывать
             json_for_db = json.dumps(payments_data, ensure_ascii=False)
-
+            
             if verbose_mode:
-                print_status("INFO", f"Передача JSON строки в базу данных",
+                print_status("INFO", f"Передача JSON строки в базу данных", 
                            f"длина: {len(json_for_db)} символов")
-
+            
             # Передаем JSON строку в функцию (как есть, без изменений)
             result_json_str = await db_calculate_payment_distribution(json_for_db)
-
+            
             if verbose_mode:
-                print_status("OK", f"Получен результат от базы данных",
+                print_status("OK", f"Получен результат от базы данных", 
                            f"длина: {len(result_json_str)} символов")
-
+            
             # Шаг 4: Парсим результат для добавления поля status
             try:
                 result_data = json.loads(result_json_str)
-
+                
                 # Формируем финальный ответ с полем status
                 response_data = {
                     "status": "success",
-                    "tickets": result_data
+                    "tickets": result_data  # результат функции db_calculate_payment_distribution
                 }
-
+                
                 response = web.json_response(response_data, status=200)
-
+                
                 if verbose_mode:
-                    print_status("OK", f"Сформирован ответ",
+                    print_status("OK", f"Сформирован ответ", 
                                f"количество тикетов: {len(result_data) if isinstance(result_data, list) else 'один'}")
-
+                    
             except json.JSONDecodeError as e:
                 if verbose_mode:
                     print_status("ERROR", f"Ошибка парсинга результата из БД", str(e))
                     print(f"  Результат (первые 500 символов): {result_json_str[:500]}")
-
+                
                 response_data = {
                     "status": "error",
                     "message": f"Ошибка обработки результата из базы данных: {str(e)}"
                 }
                 response = web.json_response(response_data, status=200)
-
+        
         except Exception as e:
             if verbose_mode:
                 print_status("ERROR", f"Ошибка при расчете распределения платежа", str(e))
-
+            
             response_data = {
                 "status": "error",
                 "message": f"Ошибка расчета распределения платежа: {str(e)}"
             }
             response = web.json_response(response_data, status=200)
-
+        
         # Шаг 5: ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
         await add_server_signature_to_response(response, token)
         if verbose_mode:
             print_status("OK", f"Добавлена серверная подпись к ответу")
-
+        
         return response
-
+        
     except web.HTTPException as he:
         # Перехватываем HTTP исключения (403, 404 и т.д.)
         response_data = {
@@ -7183,27 +6613,26 @@ async def get_payment_calculate_distribution(request: web.Request) -> web.Respon
                         ])
         await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
         return response
-
+        
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", f"Неожиданная ошибка в get_payment_calculate_distribution", str(e))
             import traceback
             traceback.print_exc()
-
+        
         response_data = {
             "status": "error",
             "message": f"Внутренняя ошибка сервера: {str(e)}"
         }
         response = web.json_response(response_data, status=200)
-
+        
         # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
         auth_header = request.headers.get("Token", "")
         token_for_signature = auth_header[7:] if auth_header.startswith("Bearer ") else "unexpected_error"
         await add_server_signature_to_response(response, token_for_signature)
-
+        
         return response
-
-
+    
 # --- СЛУЖЕБНЫЕ ОБРАБОТЧИКИ ---
 
 async def options_handler(request):
@@ -7549,7 +6978,6 @@ def check_server_status():
         "GET    /health/network      # Сетевая информация и CORS",
         "GET    /health/cloud        # Состояние облачного хранилища",
         "GET    /health/stat         # Статистика работы сервера",
-        "GET    /health/locked       # Список заблокированных пользователей",        
         "POST   /user/by-phone       # Поиск пользователя по телефону",
         "POST   /user/update         # Обновление данных пользователя",
         "POST   /user/mailing        # Управление email рассылкой",
@@ -7703,7 +7131,7 @@ async def init_app():
     Входящие параметры: Отсутствуют
     Исходящие параметры: web.Application - полностью инициализированное веб-приложение
     """
-    global config, private_key, public_key, verbose_mode, config_reload_interval, config_reload_task, blocked_user_cache_cleanup_task
+    global config, private_key, public_key, verbose_mode, config_reload_interval, config_reload_task
 
     # Инициализация базового логирования для отладки запуска
     print_status("INFO", f"Начало инициализации приложения")
@@ -7714,12 +7142,12 @@ async def init_app():
     parser.add_argument('--status', action='store_true', help='Проверить статус сервера без запуска')
     parser.add_argument('--validate-config', action='store_true', help='Проверить конфигурационный файл и выйти')
     args = parser.parse_args()
-
+    
     # Обработка флага --status
     if args.status:
         check_server_status()
         sys.exit(0)
-
+    
     # Обработка флага --validate-config
     if args.validate_config:
         config_path = args.config or 'config.json'
@@ -7727,7 +7155,7 @@ async def init_app():
             sys.exit(0)
         else:
             sys.exit(1)
-
+    
     # Если параметры не указаны, устанавливаем значения по умолчанию
     if args.config is None:
         args.config = 'config.json'
@@ -7736,31 +7164,31 @@ async def init_app():
 
     verbose_mode = args.verbose
     config_path = args.config
-
+    
     if verbose_mode:
         print_status("INFO", f"Подробный режим включен")
         print_status("INFO", f"Используется файл конфигурации", config_path)
-
+    
     # Сначала проверяем валидность конфигурационного файла
     if not validate_config_file(config_path):
         print_status("ERROR", f"Конфигурационный файл содержит ошибки", config_path)
         sys.exit(1)
-
+    
     # === УПРОЩЕННАЯ ИНИЦИАЛИЗАЦИЯ ===
     # Просто вызываем reload_configuration для первоначальной загрузки
     if verbose_mode:
         print_status("INFO", f"Загрузка конфигурации из файла", config_path)
-
+    
     if not await reload_configuration(config_path, is_initial_load=True):
         print_status("ERROR", f"Не удалось загрузить конфигурацию", config_path)
         sys.exit(1)
-
+    
     if verbose_mode:
         print_status("OK", f"Конфигурация успешно загружена")
         print(f"  Хост: {config.host}")
         print(f"  Порт: {config.port}")
         print(f"  Режим отладки: {config.debug}")
-
+    
     # Исправляем хост, если он содержит порт
     if ':' in config.host:
         host_parts = config.host.split(':')
@@ -7772,24 +7200,24 @@ async def init_app():
                     print_status("INFO", f"Порт извлечен из хоста", f"{config.port}")
             except ValueError:
                 print_status("INFO", f"Неверный формат порта в хосте", config.host)
-
+    
     # Инициализация файлового логирования (ПЕРЕМЕЩЕНО ВЫШЕ - ДО загрузки ключей и БД)
     if verbose_mode:
         print_status("INFO", f"Инициализация файлового логирования")
-
+    
     init_file_logging()
-
+    
     if verbose_mode:
         if file_logger:
             print_status("OK", f"Файловое логирование инициализировано")
         else:
             print_status("INFO", f"Файловое логирование не требуется или не настроено")
-
+    
     # Загрузка ключей только если сертификаты не отключены
     if not config.disable_certificates:
         if verbose_mode:
             print_status("INFO", f"Загрузка ключей безопасности")
-
+        
         try:
             private_key = await load_private_key()
             public_key = await load_public_key()
@@ -7806,11 +7234,11 @@ async def init_app():
     else:
         if verbose_mode:
             print_status("INFO", f"Режим сертификатов отключен")
-
+    
     # Инициализация БД с поддержкой автоматического восстановления соединения
     if verbose_mode:
         print_status("INFO", f"Инициализация подключения к базе данных")
-
+    
     try:
         await init_database()
         if verbose_mode:
@@ -7821,11 +7249,11 @@ async def init_app():
                 print_status("INFO", f"Подключение к базе данных не требуется")
     except Exception as e:
         error_msg = f"Ошибка инициализации базы данных: {e}"
-
+        
         # Логируем ошибку в файл если возможно
         if file_logger:
             file_logger.error(f"Ошибка инициализации БД: {str(e)}")
-
+        
         if config.allow_start_without_db:
             print_status("ERROR", error_msg)
             if verbose_mode:
@@ -7857,11 +7285,11 @@ async def init_app():
         else:
             print_status("ERROR", error_msg)
             print_status("ERROR", f"Запуск сервера запрещен (allow_start_without_cloud = false)")
-            sys.exit(1)
-
+            sys.exit(1)            
+    
     # Запускаем задачу периодической перезагрузки конфигурации
     config_reload_interval = config.config_reload_interval_minutes
-
+    
     if config_reload_interval > 0:
         config_reload_task = asyncio.create_task(start_config_reload_task())
         if verbose_mode:
@@ -7871,26 +7299,21 @@ async def init_app():
         if verbose_mode:
             print_status("INFO", f"Периодическая перезагрузка конфигурации отключена")
 
+
     # Инициализация статистики
     init_statistics()
 
     # Создаем и возвращаем приложение
     if verbose_mode:
         print_status("INFO", f"Создание веб-приложения")
-
+    
     app = await app_factory()
-
+    
     if verbose_mode:
         print_status("OK", f"Веб-приложение успешно создано")
         print(f"  Зарегистрировано маршрутов: {len(app.router.routes())}")
-
-    # Запуск фоновой очистки кэша блокировок (ТЗ §8.2)
-    blocked_user_cache_cleanup_task = asyncio.create_task(blocked_user_cache_cleanup_runner())
-    if verbose_mode:
-        print_status("OK", "Запущена фоновая задача очистки кэша блокировок")
-
+    
     return app
-
 
 async def reload_configuration(config_path: str = 'config.json', is_initial_load: bool = False) -> bool:
     """
@@ -8065,12 +7488,15 @@ def validate_config_file(config_path: str = 'config.json') -> bool:
 def _log_configuration_changes(old_config, new_config):
     """Логирование изменений конфигурации"""
     changes = []
+    
     if old_config.host != new_config.host:
         changes.append(f"Хост: {old_config.host} -> {new_config.host}")
     if old_config.port != new_config.port:
         changes.append(f"Порт: {old_config.port} -> {new_config.port}")
     if old_config.debug != new_config.debug:
         changes.append(f"Режим отладки: {old_config.debug} -> {new_config.debug}")
+    if old_config.log_level != new_config.log_level:
+        changes.append(f"Уровень логирования: {old_config.log_level} -> {new_config.log_level}")
     if old_config.select_top != new_config.select_top:
         changes.append(f"Лимит выборки: {old_config.select_top} -> {new_config.select_top}")
     if old_config.signature_ttl != new_config.signature_ttl:
@@ -8083,14 +7509,13 @@ def _log_configuration_changes(old_config, new_config):
         changes.append(f"Аутентификация по токену: {'отключена' if old_config.disable_token_auth else 'включена'} -> {'отключена' if new_config.disable_token_auth else 'включена'}")
     if old_config.disable_signature != new_config.disable_signature:
         changes.append(f"Проверка подписи: {'отключена' if old_config.disable_signature else 'включена'} -> {'отключена' if new_config.disable_signature else 'включена'}")
-    # Параметры блокировки
-    if old_config.blocked_user_cache_cleanup_interval_seconds != new_config.blocked_user_cache_cleanup_interval_seconds:
-        changes.append(f"Интервал очистки кэша блокировок: {old_config.blocked_user_cache_cleanup_interval_seconds} -> {new_config.blocked_user_cache_cleanup_interval_seconds} сек")
-    if old_config.max_failed_login_events != new_config.max_failed_login_events:
-        changes.append(f"Лимит буфера неуспешных попыток: {old_config.max_failed_login_events} -> {new_config.max_failed_login_events}")
-    if old_config.max_blocked_users_cache_size != new_config.max_blocked_users_cache_size:
-        changes.append(f"Лимит кэша блокировок: {old_config.max_blocked_users_cache_size} -> {new_config.max_blocked_users_cache_size}")
-
+    if old_config.login_security.get('enabled') != new_config.login_security.get('enabled'):
+        changes.append(f"Безопасность входа: {'включена' if new_config.login_security.get('enabled') else 'отключена'}")
+    if old_config.login_security.get('max_failed_attempts') != new_config.login_security.get('max_failed_attempts'):
+        changes.append(f"Макс. попыток входа: {old_config.login_security.get('max_failed_attempts')} -> {new_config.login_security.get('max_failed_attempts')}")
+    if old_config.login_security.get('check_period_minutes') != new_config.login_security.get('check_period_minutes'):
+        changes.append(f"Период проверки: {old_config.login_security.get('check_period_minutes')} -> {new_config.login_security.get('check_period_minutes')} мин")
+    
     if changes:
         print(f"  Изменения в конфигурации:")
         for change in changes:
@@ -8241,7 +7666,6 @@ async def app_factory() -> web.Application:
     app.router.add_get('/health/network', health_network)
     app.router.add_get('/health/cloud', health_cloud)
     app.router.add_get('/health/stat', health_statistics)    
-    app.router.add_get('/health/locked', health_locked)    
     app.router.add_get('/help', help_handler)
 
     app.router.add_post('/user/by-phone', get_user_by_phone)
@@ -8400,8 +7824,8 @@ async def shutdown():
     Входящие параметры: Отсутствуют
     Исходящие параметры: Отсутствуют (побочный эффект - освобождение ресурсов)
     """
-    global config_reload_task, blocked_user_cleanup_task
-
+    global config_reload_task
+    
     # Останавливаем задачу перезагрузки конфигурации если она запущена
     if config_reload_task and not config_reload_task.done():
         config_reload_task.cancel()
@@ -8409,15 +7833,7 @@ async def shutdown():
             await config_reload_task
         except asyncio.CancelledError:
             pass
-
-    # Останавливаем задачу очистки кэша блокировок если она запущена
-    if blocked_user_cleanup_task and not blocked_user_cleanup_task.done():
-        blocked_user_cleanup_task.cancel()
-        try:
-            await blocked_user_cleanup_task
-        except asyncio.CancelledError:
-            pass
-
+    
     await close_database()
     if verbose_mode:
         print_status("INFO", f"Сервер остановлен")
