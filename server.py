@@ -4419,8 +4419,9 @@ async def get_user_login(request):
     """
     endpoint = '/user/login'
 
-    token = await authenticate_request(request)
-    request.authenticated_token = token
+    auth_result = await authenticate_request(request)
+    if auth_result is not None:
+        return auth_result
 
     try:
         data = await request.json()
@@ -5170,15 +5171,6 @@ async def auth_middleware(app, handler):
                 return response
             else:
                 response = await handler(request)
-                if isinstance(response, str):
-                    response = web.Response(text=response, content_type='text/plain', charset='utf-8')
-                elif isinstance(response, bytes):
-                    response = web.Response(body=response)
-                elif response is not None and not isinstance(response, web.StreamResponse):
-                    try:
-                        response = web.json_response(response)
-                    except Exception:
-                        response = web.Response(text=str(response), content_type='text/plain', charset='utf-8')
                 # Добавляем подпись и токен к успешным ответам
                 await add_server_signature_to_response(response, authenticated_token)
                 return response
@@ -6541,21 +6533,12 @@ async def get_tickets(request):
     """
     endpoint = '/ticket/list'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
-
     try:
         data = await request.json()
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return create_response(
-            {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
-            status=200
-        )
+        return web.json_response({"status": "error", "code": 400, "message": "Некорректный JSON"}, status=200)
 
     user_id = data.get('user_id') or data.get('id')
     phone = data.get('phone')
@@ -6567,20 +6550,10 @@ async def get_tickets(request):
         except Exception as e:
             if verbose_mode:
                 print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return create_response(
-                {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                request_data={"endpoint": endpoint, "phone": phone},
-                endpoint=endpoint,
-                status=200
-            )
+            return web.json_response({"status": "error", "code": 400, "message": "Некорректный номер телефона"}, status=200)
 
     if user_id is None and normalized_phone is None:
-        return create_response(
-            {"status": "error", "code": 400, "message": "Не указан идентификатор пользователя"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
-            status=200
-        )
+        return web.json_response({"status": "error", "code": 400, "message": "Не указан идентификатор пользователя"}, status=200)
 
     blocked_response = await ensure_user_request_not_blocked(
         user_id=user_id,
@@ -6593,12 +6566,8 @@ async def get_tickets(request):
     ticket_status = data.get('status', '')
     result = await db_tickets(str(user_id), ticket_status)
 
-    return create_response(
-        result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
-        request_data={"endpoint": endpoint, "user_id": user_id, "phone": normalized_phone},
-        endpoint=endpoint,
-        status=200
-    )
+    payload = result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result}
+    return web.json_response(payload, status=200)
 
 async def get_setpayment(request: web.Request) -> web.Response:
     """
