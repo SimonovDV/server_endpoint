@@ -4419,8 +4419,9 @@ async def get_user_login(request):
     """
     endpoint = '/user/login'
 
-    token = await authenticate_request(request)
-    request.authenticated_token = token
+    auth_result = await authenticate_request(request)
+    if auth_result is not None:
+        return auth_result
 
     try:
         data = await request.json()
@@ -5076,14 +5077,14 @@ async def cors_middleware(app, handler):
         else:
             response = await handler(request)
             if isinstance(response, str):
-                response = web.Response(text=response, content_type='text/plain; charset=utf-8')
+                response = web.Response(text=response, content_type='text/plain', charset='utf-8')
             elif isinstance(response, bytes):
                 response = web.Response(body=response)
             elif not isinstance(response, web.StreamResponse):
                 try:
                     response = web.json_response(response)
                 except Exception:
-                    response = web.Response(text=str(response), content_type='text/plain; charset=utf-8')
+                    response = web.Response(text=str(response), content_type='text/plain', charset='utf-8')
         
         # Добавляем CORS заголовки
         origin = request.headers.get('Origin', '')
@@ -6581,8 +6582,7 @@ async def get_tickets(request):
     if blocked_response is not None:
         return blocked_response
 
-    ticket_status = data.get('status', '')
-    result = await db_tickets(str(user_id), ticket_status)
+    result = await db_tickets(data)
 
     return create_response(
         result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
