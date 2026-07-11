@@ -4419,9 +4419,8 @@ async def get_user_login(request):
     """
     endpoint = '/user/login'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    token = await authenticate_request(request)
+    request.authenticated_token = token
 
     try:
         data = await request.json()
@@ -5077,14 +5076,14 @@ async def cors_middleware(app, handler):
         else:
             response = await handler(request)
             if isinstance(response, str):
-                response = web.Response(text=response, content_type='text/plain', charset='utf-8')
+                response = web.Response(text=response, content_type='text/plain; charset=utf-8')
             elif isinstance(response, bytes):
                 response = web.Response(body=response)
             elif not isinstance(response, web.StreamResponse):
                 try:
                     response = web.json_response(response)
                 except Exception:
-                    response = web.Response(text=str(response), content_type='text/plain', charset='utf-8')
+                    response = web.Response(text=str(response), content_type='text/plain; charset=utf-8')
         
         # Добавляем CORS заголовки
         origin = request.headers.get('Origin', '')
@@ -5171,6 +5170,15 @@ async def auth_middleware(app, handler):
                 return response
             else:
                 response = await handler(request)
+                if isinstance(response, str):
+                    response = web.Response(text=response, content_type='text/plain', charset='utf-8')
+                elif isinstance(response, bytes):
+                    response = web.Response(body=response)
+                elif response is not None and not isinstance(response, web.StreamResponse):
+                    try:
+                        response = web.json_response(response)
+                    except Exception:
+                        response = web.Response(text=str(response), content_type='text/plain', charset='utf-8')
                 # Добавляем подпись и токен к успешным ответам
                 await add_server_signature_to_response(response, authenticated_token)
                 return response
@@ -6582,7 +6590,8 @@ async def get_tickets(request):
     if blocked_response is not None:
         return blocked_response
 
-    result = await db_tickets(data)
+    ticket_status = data.get('status', '')
+    result = await db_tickets(str(user_id), ticket_status)
 
     return create_response(
         result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
