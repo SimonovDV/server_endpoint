@@ -5076,6 +5076,15 @@ async def cors_middleware(app, handler):
             response = web.Response()
         else:
             response = await handler(request)
+            if isinstance(response, str):
+                response = web.Response(text=response, content_type='text/plain; charset=utf-8')
+            elif isinstance(response, bytes):
+                response = web.Response(body=response)
+            elif not isinstance(response, web.StreamResponse):
+                try:
+                    response = web.json_response(response)
+                except Exception:
+                    response = web.Response(text=str(response), content_type='text/plain; charset=utf-8')
         
         # Добавляем CORS заголовки
         origin = request.headers.get('Origin', '')
