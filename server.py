@@ -65,7 +65,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+from decimal import Decimal
 from collections import deque
 
 
@@ -4407,6 +4408,24 @@ async def remove_user_block(user_id=None, phone=None):
 
     return removed
 
+def create_response(data: dict, request_data: dict = None, endpoint: str = None, status: int = 200) -> web.Response:
+    """
+    Унифицированное формирование JSON-ответа сервера.
+
+    Используется обработчиками для возврата совместимого ответа без
+    дублирования web.json_response(...) по всему коду.
+    """
+    try:
+        if isinstance(data, dict):
+            payload = data
+        else:
+            payload = {"status": "success", "data": data}
+        return web.json_response(payload, status=status)
+    except Exception as e:
+        fallback = {"status": "error", "message": f"Ошибка формирования ответа: {e}"}
+        return web.json_response(fallback, status=500)
+
+
 async def get_user_login(request):
     """
     Название: get_user_login
@@ -4419,9 +4438,7 @@ async def get_user_login(request):
     """
     endpoint = '/user/login'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    auth_result = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
@@ -5077,14 +5094,14 @@ async def cors_middleware(app, handler):
         else:
             response = await handler(request)
             if isinstance(response, str):
-                response = web.Response(text=response, content_type='text/plain; charset=utf-8')
+                response = web.Response(text=response, content_type='text/plain', charset='utf-8')
             elif isinstance(response, bytes):
                 response = web.Response(body=response)
             elif not isinstance(response, web.StreamResponse):
                 try:
                     response = web.json_response(response)
                 except Exception:
-                    response = web.Response(text=str(response), content_type='text/plain; charset=utf-8')
+                    response = web.Response(text=str(response), content_type='text/plain', charset='utf-8')
         
         # Добавляем CORS заголовки
         origin = request.headers.get('Origin', '')
@@ -6270,9 +6287,7 @@ async def get_user_by_phone_legacy(request):
     """
     endpoint = '/user/by-phone'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    auth_result = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
@@ -6309,7 +6324,7 @@ async def get_user_by_phone_legacy(request):
     if blocked_response is not None:
         return blocked_response
 
-    result = await db_userid(phone=normalized_phone)
+    result = await db_user_login(normalized_phone, '')
 
     if result:
         return create_response(
@@ -6336,9 +6351,7 @@ async def get_user_by_phone(request):
     """
     endpoint = '/user/by-phone'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    auth_result = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
@@ -6380,7 +6393,7 @@ async def get_user_by_phone(request):
     if blocked_response is not None:
         return blocked_response
 
-    result = await db_userid(phone=normalized_phone)
+    result = await db_user_by_phone(normalized_phone)
 
     if result:
         return create_response(
@@ -6420,9 +6433,7 @@ async def get_user_update(request):
     """
     endpoint = '/user/update'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    auth_result = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
@@ -6488,12 +6499,13 @@ async def get_user_update(request):
             status=200
         )
 
-    update_payload = dict(data)
+    email = data.get('email', '')
+    password_for_db = ''
 
     if password_present:
-        update_payload['password'] = hash_password(raw_password.strip())
+        password_for_db = hash_password(raw_password.strip())
 
-    result = await db_user_update(update_payload)
+    result = await db_user_update(int(user_id), email, password_for_db)
 
     is_success = False
     if isinstance(result, dict):
@@ -6533,9 +6545,7 @@ async def get_tickets(request):
     """
     endpoint = '/ticket/list'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    auth_result = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
@@ -6602,8 +6612,7 @@ async def get_setpayment(request: web.Request) -> web.Response:
     """
     try:
         # Аутентификация по токену (с проверкой подписи клиента)
-        token = await authenticate_request(request)
-        request.authenticated_token = token
+        token = getattr(request, 'authenticated_token', None)
         if verbose_mode:
             print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
         
@@ -6754,9 +6763,7 @@ async def get_login(request):
     if verbose_mode:
         print_status("INFO", f"Получен запрос {endpoint}", f"request_id={request_id}")
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    auth_result = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
@@ -6969,9 +6976,7 @@ async def get_setdocument(request):
     """
     endpoint = '/document/load'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    auth_result = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
@@ -7029,9 +7034,7 @@ async def get_documentsigned(request):
     """
     endpoint = '/document/signed'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    auth_result = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
@@ -7091,9 +7094,7 @@ async def get_documentlist(request):
     """
     endpoint = '/document/list'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    auth_result = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
@@ -7161,8 +7162,7 @@ async def get_useremailing(request: web.Request) -> web.Response:
     """
     try:
         # Аутентификация по токену (с проверкой подписи клиента)
-        token = await authenticate_request(request)
-        request.authenticated_token = token
+        token = getattr(request, 'authenticated_token', None)
         if verbose_mode:
             print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
         
@@ -7315,8 +7315,7 @@ async def get_payment_calculate_distribution(request: web.Request) -> web.Respon
     """
     try:
         # Аутентификация по токену (с проверкой подписи клиента)
-        token = await authenticate_request(request)
-        request.authenticated_token = token
+        token = getattr(request, 'authenticated_token', None)
         if verbose_mode:
             print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
         
