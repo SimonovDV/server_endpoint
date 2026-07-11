@@ -6533,12 +6533,21 @@ async def get_tickets(request):
     """
     endpoint = '/ticket/list'
 
+    auth_result = await authenticate_request(request)
+    if auth_result is not None:
+        return auth_result
+
     try:
         data = await request.json()
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return web.json_response({"status": "error", "code": 400, "message": "Некорректный JSON"}, status=200)
+        return create_response(
+            {"status": "error", "code": 400, "message": "Некорректный JSON"},
+            request_data={"endpoint": endpoint},
+            endpoint=endpoint,
+            status=200
+        )
 
     user_id = data.get('user_id') or data.get('id')
     phone = data.get('phone')
@@ -6550,10 +6559,20 @@ async def get_tickets(request):
         except Exception as e:
             if verbose_mode:
                 print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return web.json_response({"status": "error", "code": 400, "message": "Некорректный номер телефона"}, status=200)
+            return create_response(
+                {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
+                request_data={"endpoint": endpoint, "phone": phone},
+                endpoint=endpoint,
+                status=200
+            )
 
     if user_id is None and normalized_phone is None:
-        return web.json_response({"status": "error", "code": 400, "message": "Не указан идентификатор пользователя"}, status=200)
+        return create_response(
+            {"status": "error", "code": 400, "message": "Не указан идентификатор пользователя"},
+            request_data={"endpoint": endpoint},
+            endpoint=endpoint,
+            status=200
+        )
 
     blocked_response = await ensure_user_request_not_blocked(
         user_id=user_id,
@@ -6563,11 +6582,14 @@ async def get_tickets(request):
     if blocked_response is not None:
         return blocked_response
 
-    ticket_status = data.get('status', '')
-    result = await db_tickets(str(user_id), ticket_status)
+    result = await db_tickets(data)
 
-    payload = result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result}
-    return web.json_response(payload, status=200)
+    return create_response(
+        result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
+        request_data={"endpoint": endpoint, "user_id": user_id, "phone": normalized_phone},
+        endpoint=endpoint,
+        status=200
+    )
 
 async def get_setpayment(request: web.Request) -> web.Response:
     """
@@ -6714,62 +6736,30 @@ async def get_setpayment(request: web.Request) -> web.Response:
 
 
 async def get_login(request):
-    """
-    Название: get_login
-    Назначение: Аутентификация пользователя через БД с учетом локального кэша блокировок
-    Описание:
-        1. Проверяет заголовки безопасности.
-        2. Валидирует и нормализует только phone и password.
-        3. Не принимает и не валидирует параметры политики блокировки от сайта.
-        4. Использует per-user lock по ключу phone:<normalized_phone>.
-        5. Проверяет активную блокировку в локальном кэше ПБД.
-        6. Если локальной блокировки нет, обращается в БД.
-        7. Блокировка обрабатывается только по новому JSON-ответу БД.
-    """
     request_id = str(uuid.uuid4())
     endpoint = '/user/login'
 
     if verbose_mode:
         print_status("INFO", f"Получен запрос {endpoint}", f"request_id={request_id}")
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
-
     try:
         data = await request.json()
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return create_response(
-            {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            request_data={"request_id": request_id, "endpoint": endpoint},
-            endpoint=endpoint,
-            status=200
-        )
+        return web.json_response({"status": "error", "code": 400, "message": "Некорректный JSON"}, status=200)
 
     phone = data.get('phone', '')
     password = data.get('password', '')
-
     if not phone or not password:
-        return create_response(
-            {"status": "error", "code": 400, "message": "Поля phone и password обязательны"},
-            request_data={"request_id": request_id, "endpoint": endpoint},
-            endpoint=endpoint,
-            status=200
-        )
+        return web.json_response({"status": "error", "code": 400, "message": "Поля phone и password обязательны"}, status=200)
 
     try:
         normalized_phone = normalize_phone(phone)
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка нормализации телефона", str(e))
-        return create_response(
-            {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-            request_data={"request_id": request_id, "endpoint": endpoint},
-            endpoint=endpoint,
-            status=200
-        )
+        return web.json_response({"status": "error", "code": 400, "message": "Некорректный номер телефона"}, status=200)
 
     user_lock_key = f"phone:{normalized_phone}"
     user_lock = await get_user_operation_lock(user_lock_key)
@@ -6780,22 +6770,12 @@ async def get_login(request):
 
         active_block = await get_active_user_block(phone=normalized_phone)
         if active_block:
-            if verbose_mode:
-                print_status("WARNING", "Запрос отклонен по локальному кэшу блокировок", normalized_phone)
-
-            return create_response(
+            return web.json_response(
                 build_user_blocked_response_payload(
                     message=active_block.get("message") or "Пользователь временно заблокирован",
                     blocked_until=active_block.get("blocked_until"),
                     server_time=datetime.now()
                 ),
-                request_data={
-                    "request_id": request_id,
-                    "endpoint": endpoint,
-                    "phone": normalized_phone,
-                    "block_source": "pbd_local_cache"
-                },
-                endpoint=endpoint,
                 status=200
             )
 
@@ -6806,12 +6786,16 @@ async def get_login(request):
         except Exception as e:
             if verbose_mode:
                 print_status("ERROR", "Ошибка авторизации в БД", str(e))
-            return create_response(
-                {"status": "error", "code": 500, "message": "Ошибка авторизации"},
-                request_data={"request_id": request_id, "endpoint": endpoint, "phone": normalized_phone},
-                endpoint=endpoint,
-                status=200
-            )
+            return web.json_response({"status": "error", "code": 3, "message": "Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку."}, status=200)
+
+        if result == 'invalid_credentials':
+            await register_failed_login_attempt(phone=normalized_phone, user_id=None, source='db_result')
+            return web.json_response({
+                "status": "error",
+                "code": 1,
+                "errorcode": "INVALID_CREDENTIALS",
+                "message": "Неверный логин или пароль"
+            }, status=200)
 
         if isinstance(result, dict) and result.get('status') == 'blocked':
             try:
@@ -6820,126 +6804,57 @@ async def get_login(request):
                     db_current_timestamp_raw=result.get('db_current_timestamp'),
                     local_received_at=datetime.now()
                 )
-            except Exception as e:
-                if verbose_mode:
-                    print_status("ERROR", "Ошибка синхронизации времени блокировки", str(e))
-                return create_response(
-                    {"status": "error", "code": 500, "message": "Ошибка обработки блокировки пользователя"},
-                    request_data={"request_id": request_id, "endpoint": endpoint, "phone": normalized_phone},
-                    endpoint=endpoint,
+                local_received_at = time_sync["local_received_at"]
+                local_blocked_until = time_sync["local_blocked_until"]
+                clock_skew_seconds = time_sync["clock_skew_seconds"]
+                db_current_timestamp = time_sync["db_current_timestamp"]
+                await cache_user_block(
+                    user_id=result.get('user_id') or result.get('id'),
+                    normalized_phone=normalized_phone,
+                    blocked_from=local_received_at,
+                    blocked_until=local_blocked_until,
+                    reason='db_reported_block',
+                    db_current_timestamp=db_current_timestamp,
+                    clock_skew_seconds=clock_skew_seconds,
+                    message=result.get('message') or 'Пользователь временно заблокирован'
+                )
+                return web.json_response(
+                    build_user_blocked_response_payload(
+                        message=result.get('message') or "Пользователь временно заблокирован",
+                        blocked_until=local_blocked_until,
+                        server_time=local_received_at
+                    ),
                     status=200
                 )
-
-            local_received_at = time_sync["local_received_at"]
-            local_blocked_until = time_sync["local_blocked_until"]
-            clock_skew_seconds = time_sync["clock_skew_seconds"]
-            db_current_timestamp = time_sync["db_current_timestamp"]
-
-            await cache_user_block(
-                user_id=result.get('user_id') or result.get('id'),
-                normalized_phone=normalized_phone,
-                blocked_from=local_received_at,
-                blocked_until=local_blocked_until,
-                reason='db_reported_block',
-                db_current_timestamp=db_current_timestamp,
-                clock_skew_seconds=clock_skew_seconds,
-                message=result.get('message') or 'Пользователь временно заблокирован'
-            )
-
-            if verbose_mode:
-                print_status(
-                    "INFO",
-                    "Блокировка восстановлена в локальном кэше ПБД из нового JSON-ответа БД",
-                    f"phone={normalized_phone}, blocked_until={local_blocked_until.isoformat(timespec='seconds')}"
-                )
-
-            return create_response(
-                build_user_blocked_response_payload(
-                    message=result.get('message') or "Пользователь временно заблокирован",
-                    blocked_until=local_blocked_until,
-                    server_time=local_received_at
-                ),
-                request_data={
-                    "request_id": request_id,
-                    "endpoint": endpoint,
-                    "phone": normalized_phone,
-                    "block_source": "db_json_blocked"
-                },
-                endpoint=endpoint,
-                status=200
-            )
-
-        if result == 'invalid_credentials':
-            await register_failed_login_attempt(
-                phone=normalized_phone,
-                user_id=None,
-                source='db_result'
-            )
-
-            if verbose_mode:
-                print_status("INFO", "БД вернула invalid_credentials без блокировки", normalized_phone)
-
-            return create_response(
-                {
-                    "status": "error",
-                    "code": 1,
-                    "errorcode": "INVALID_CREDENTIALS",
-                    "message": "Неверный логин или пароль"
-                },
-                request_data={
-                    "request_id": request_id,
-                    "endpoint": endpoint,
-                    "phone": normalized_phone,
-                    "block_source": "none"
-                },
-                endpoint=endpoint,
-                status=200
-            )
+            except Exception as e:
+                if verbose_mode:
+                    print_status("ERROR", "Ошибка обработки блокировки пользователя", str(e))
+                return web.json_response({"status": "error", "code": 3, "message": "Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку."}, status=200)
 
         if isinstance(result, dict) and result.get('status') == 'success':
             result_payload = result.get('data')
-            user_id = None
-
-            if isinstance(result_payload, dict):
-                user_id = result_payload.get('USR_Id') or result_payload.get('id')
-
+            user_id = result_payload.get('USR_Id') if isinstance(result_payload, dict) else None
             await clear_failed_login_attempts(phone=normalized_phone, user_id=user_id)
-
-            return create_response(
-                {
-                    "status": "success",
-                    "code": 0,
-                    "message": "Авторизация успешна",
-                    "data": result_payload
-                },
-                request_data={"request_id": request_id, "endpoint": endpoint, "phone": normalized_phone},
-                endpoint=endpoint,
-                status=200
-            )
+            return web.json_response({
+                "status": "success",
+                "code": 0,
+                "message": "Авторизация успешна",
+                "data": result_payload
+            }, status=200)
 
         if isinstance(result, dict) and result.get('status') == 'error':
-            return create_response(
-                {
-                    "status": "error",
-                    "code": 500,
-                    "message": result.get('message', 'Ошибка авторизации')
-                },
-                request_data={"request_id": request_id, "endpoint": endpoint, "phone": normalized_phone},
-                endpoint=endpoint,
-                status=200
-            )
-
-        return create_response(
-            {
+            return web.json_response({
                 "status": "error",
-                "code": 500,
-                "message": "Неизвестный результат авторизации"
-            },
-            request_data={"request_id": request_id, "endpoint": endpoint, "phone": normalized_phone},
-            endpoint=endpoint,
-            status=200
-        )
-                
+                "code": result.get('code', 3),
+                "message": result.get('message', 'Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку.')
+            }, status=200)
+
+        return web.json_response({
+            "status": "error",
+            "code": 3,
+            "message": "Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку."
+        }, status=200)
+
 async def get_setdocument(request):
     """
     Загрузка документа.
