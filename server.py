@@ -5070,45 +5070,53 @@ async def cors_middleware(app, handler):
         # Если CORS отключен, пропускаем обработку
         if not config.cors_enabled:
             return await handler(request)
-        
+
         # Обработка preflight OPTIONS запросов
         if request.method == 'OPTIONS':
             response = web.Response()
         else:
             response = await handler(request)
+
             if isinstance(response, str):
-                response = web.Response(text=response, content_type='text/plain; charset=utf-8')
+                response = web.Response(
+                    text=response,
+                    content_type='text/plain',
+                    charset='utf-8'
+                )
             elif isinstance(response, bytes):
                 response = web.Response(body=response)
             elif not isinstance(response, web.StreamResponse):
                 try:
                     response = web.json_response(response)
                 except Exception:
-                    response = web.Response(text=str(response), content_type='text/plain; charset=utf-8')
-        
+                    response = web.Response(
+                        text=str(response),
+                        content_type='text/plain',
+                        charset='utf-8'
+                    )
+
         # Добавляем CORS заголовки
         origin = request.headers.get('Origin', '')
-        
+
         # Проверяем разрешен ли origin
         if config.cors_allowed_origins == ['*'] or origin in config.cors_allowed_origins:
             response.headers['Access-Control-Allow-Origin'] = origin if config.cors_allowed_origins != ['*'] else '*'
-            
+
             if config.cors_expose_headers:
                 response.headers['Access-Control-Expose-Headers'] = ', '.join(config.cors_expose_headers)
-            
+
             if config.cors_allow_credentials:
                 response.headers['Access-Control-Allow-Credentials'] = 'true'
-        
+
         # Для OPTIONS запросов добавляем дополнительные заголовки
         if request.method == 'OPTIONS':
             response.headers['Access-Control-Allow-Methods'] = ', '.join(config.cors_allowed_methods)
             response.headers['Access-Control-Allow-Headers'] = ', '.join(config.cors_allowed_headers)
             response.headers['Access-Control-Max-Age'] = str(config.cors_max_age)
-        
-        return response
-    
-    return middleware_handler
 
+        return response
+
+    return middleware_handler
 
 async def auth_middleware(app, handler):
     """
@@ -5122,97 +5130,119 @@ async def auth_middleware(app, handler):
     Исходящие параметры: Функция-обработчик middleware
     """
     async def middleware_handler(request: web.Request) -> web.Response:
-        # Сохраняем запрос в памяти
         request_id = await store_request(request)
         start_time = time.time()
         response = None
         error = None
         authenticated_token = None
 
-        # Учитываем запрос к серверу (кроме health-эндпоинтов)
         if not request.path.startswith('/health'):
             record_server_request()
-        
-        # Вывод подробной информации о запросе в verbose режиме
+
         await print_verbose_request(request)
-        
+
         try:
-            # Аутентификация для ВСЕХ запросов
             try:
                 authenticated_token = await authenticate_request(request)
-                # Сохраняем токен в объекте запроса для использования в обработчиках
                 request.authenticated_token = authenticated_token
                 if verbose_mode:
                     print_status("OK", f"Аутентификация успешна", f"токен {authenticated_token[:8]}...")
             except web.HTTPException as auth_error:
-                # Сохраняем ошибку аутентификации, но продолжаем обработку
                 error = auth_error.text
                 response = auth_error
                 if verbose_mode:
                     print_status("ERROR", f"Ошибка аутентификации", error)
-                # Для ошибок аутентификации все равно нужно добавить подпись и токен
-                # Извлекаем токен из заголовка Token для подписи
+
                 auth_header = request.headers.get("Token", "")
                 token_for_signature = None
                 if auth_header.startswith("Bearer "):
                     token_for_signature = auth_header[7:]
                     if verbose_mode:
                         print_status("INFO", f"Используем токен из заголовка для подписи", f"{token_for_signature[:8]}...")
+
                 await add_server_signature_to_response(response, token_for_signature)
                 return response
-            
-            # Обрабатываем favicon.ico - возвращаем 404 с подписью и токеном
+
             if request.path == '/favicon.ico':
-                response = web.HTTPNotFound(text=json.dumps({
-                    "status": "error",
-                    "message": "Эндпоинт не найден"
-                }), content_type='application/json')
+                response = web.HTTPNotFound(
+                    text=json.dumps({
+                        "status": "error",
+                        "message": "Эндпоинт не найден"
+                    }),
+                    content_type='application/json'
+                )
                 await add_server_signature_to_response(response, authenticated_token)
                 return response
-            else:
-                response = await handler(request)
-                # Добавляем подпись и токен к успешным ответам
-                await add_server_signature_to_response(response, authenticated_token)
-                return response
-            
+
+            response = await handler(request)
+
+            if isinstance(response, str):
+                response = web.Response(
+                    text=response,
+                    content_type='text/plain',
+                    charset='utf-8'
+                )
+            elif isinstance(response, bytes):
+                response = web.Response(body=response)
+            elif not isinstance(response, web.StreamResponse):
+                try:
+                    response = web.json_response(response, status=200)
+                except Exception:
+                    response = web.Response(
+                        text=str(response),
+                        content_type='text/plain',
+                        charset='utf-8'
+                    )
+
+            await add_server_signature_to_response(response, authenticated_token)
+            return response
+
         except web.HTTPException as he:
             response = he
             error = he.text
             if verbose_mode:
-                print_status("ERROR", f"HTTP исключение",
-                            data_lines=[
-                                f"Статус: {he.status}",
-                                f"Текст: {error}"
-                            ])
-            # Добавляем подпись и токен к HTTP исключениям
+                print_status(
+                    "ERROR",
+                    f"HTTP исключение",
+                    data_lines=[
+                        f"Статус: {he.status}",
+                        f"Текст: {error}"
+                    ]
+                )
+
             token_for_signature = getattr(request, 'authenticated_token', None)
             await add_server_signature_to_response(response, token_for_signature)
             raise
+
         except Exception as e:
             error = str(e)
             if verbose_mode:
                 print_status("ERROR", f"Неожиданная ошибка", str(e))
                 import traceback
                 traceback.print_exc()
-            response = web.HTTPBadRequest(text=json.dumps({
-                "status": "error",
-                "message": "Ошибка обработки запроса"
-            }), content_type='application/json')
-            # Добавляем подпись и токен к исключениям
+
+            response = web.json_response(
+                {
+                    "status": "error",
+                    "code": 3,
+                    "message": "Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку."
+                },
+                status=200
+            )
+
             token_for_signature = getattr(request, 'authenticated_token', None)
             await add_server_signature_to_response(response, token_for_signature)
-            raise response
+            return response
+
         finally:
-            # Вывод подробной информации об ответе в verbose режиме
             if response:
                 print_verbose_response(response)
-            
+
             processing_time = int((time.time() - start_time) * 1000)
-            
-            # Асинхронное логирование (не блокирует основной поток)
             asyncio.create_task(log_request_async(request, response, processing_time, error, request_id))
-    
+
     return middleware_handler
+
 
 async def debug_logging_system(request: web.Request, response: web.Response):
     """Временная функция для отладки системы логирования"""
