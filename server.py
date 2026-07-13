@@ -2884,7 +2884,7 @@ async def db_login(phone: str, hashed_password: str):
         cursor = db_connection.cursor()
         try:
             cursor.execute(
-                "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?",
+                "EXECUTE [dbo].[USR_Select_ID_deb_block] @USR_Phone = ?, @USR_Password = ?",
                 phone,
                 hashed_password
             )
@@ -5411,17 +5411,21 @@ async def health_security(request: web.Request) -> web.Response:
     """
     Название: health_security
     Назначение: Детальная информация о режиме безопасности сервера с анализом текущего запроса
+                и полной информацией о локальном кэше заблокированных пользователей
     Описание: Возвращает подробную информацию о текущих настройках безопасности, анализирует заголовки запроса,
-              расшифровывает подпись, проверяет временные метки и предоставляет диагностику ошибок безопасности
+              расшифровывает подпись, проверяет временные метки, предоставляет диагностику ошибок безопасности,
+              а также полный список заблокированных пользователей из локального кэша ПБД
     Принцип работы: Собирает информацию о сертификатах, токенах, анализирует заголовки текущего запроса,
-                   проверяет подпись и предоставляет рекомендации по исправлению
+                   проверяет подпись, сериализует локальный кэш blocked_users и предоставляет рекомендации по исправлению
     Входящие параметры: request - объект HTTP запроса
     Исходящие параметры: web.Response - JSON ответ с кодом статуса 200 и детальной информацией о безопасности
     """
+    global blocked_users, blocked_user_lock
+
     # Проверяем доступность ключей
     private_key_available = os.path.exists(config.server_private_key_path) if not config.disable_certificates else False
     public_key_available = os.path.exists(config.client_public_key_path) if not config.disable_certificates else False
-    
+
     # Анализ текущих заголовков запроса
     current_headers = {}
     security_analysis = {
@@ -5429,11 +5433,11 @@ async def health_security(request: web.Request) -> web.Response:
         "warnings": [],
         "recommendations": []
     }
-    
+
     # Собираем все заголовки запроса
     for name, value in request.headers.items():
         current_headers[name] = value
-    
+
     # Анализ заголовка Token
     token_header = request.headers.get("Token", "")
     token_analysis = {
@@ -5442,7 +5446,7 @@ async def health_security(request: web.Request) -> web.Response:
         "token_value": token_header[7:] if token_header.startswith("Bearer ") else token_header,
         "token_valid": False
     }
-    
+
     if token_header:
         if not token_header.startswith("Bearer "):
             security_analysis["errors"].append("Заголовок Token должен иметь формат: 'Bearer <токен>'")
@@ -5454,7 +5458,7 @@ async def health_security(request: web.Request) -> web.Response:
                 security_analysis["errors"].append(f"Токен '{token}' не найден в списке разрешенных токенов")
     else:
         security_analysis["warnings"].append("Отсутствует заголовок Token")
-    
+
     # Анализ заголовка Signature
     signature_header = request.headers.get("Signature", "")
     signature_analysis = {
@@ -5465,25 +5469,21 @@ async def health_security(request: web.Request) -> web.Response:
         "signature_valid": False,
         "error_details": None
     }
-    
+
     if signature_header:
         try:
-            # Декодируем Base64 подпись
             signature_bytes = base64.b64decode(signature_header)
             signature_analysis["signature_length_bytes"] = len(signature_bytes)
-            
-            # Пытаемся расшифровать подпись и получить данные
+
             if token_analysis["token_value"] and public_key:
                 current_time = int(time.time())
                 max_offset = config.signature_ttl * 3
-                
-                # Проверяем подпись для временных меток в диапазоне
+
                 for time_offset in range(0, max_offset, 10):
                     expiry_time = current_time + time_offset
                     data_to_verify = f"{token_analysis['token_value']}.{expiry_time}".encode('utf-8')
-                    
+
                     try:
-                        # Проверяем подпись с публичным ключом клиента
                         public_key.verify(
                             signature_bytes,
                             data_to_verify,
@@ -5493,8 +5493,7 @@ async def health_security(request: web.Request) -> web.Response:
                             ),
                             hashes.SHA256()
                         )
-                        
-                        # Если подпись верна
+
                         signature_analysis["decoded_data"] = {
                             "token": token_analysis["token_value"],
                             "expiry_timestamp": expiry_time,
@@ -5504,25 +5503,29 @@ async def health_security(request: web.Request) -> web.Response:
                         }
                         signature_analysis["timestamp_valid"] = expiry_time >= current_time
                         signature_analysis["signature_valid"] = True
-                        
+
                         if not signature_analysis["timestamp_valid"]:
-                            security_analysis["errors"].append(f"Подпись просрочена. Время истечения: {signature_analysis['decoded_data']['expiry_time_human']}")
-                        
+                            security_analysis["errors"].append(
+                                f"Подпись просрочена. Время истечения: {signature_analysis['decoded_data']['expiry_time_human']}"
+                            )
+
                         break
                     except InvalidSignature:
                         continue
-                    except Exception as e:
+                    except Exception:
                         continue
-                
+
                 if not signature_analysis["signature_valid"]:
-                    security_analysis["errors"].append("Не удалось верифицировать подпись. Возможные причины: неверный токен, истекшее время или несоответствие ключей")
-            
+                    security_analysis["errors"].append(
+                        "Не удалось верифицировать подпись. Возможные причины: неверный токен, истекшее время или несоответствие ключей"
+                    )
+
         except Exception as e:
             signature_analysis["error_details"] = str(e)
             security_analysis["errors"].append(f"Ошибка декодирования подписи: {str(e)}")
     else:
         security_analysis["warnings"].append("Отсутствует заголовок Signature")
-    
+
     # Формируем рекомендации
     if security_analysis["errors"]:
         security_analysis["recommendations"].append("Для успешной аутентификации необходимо:")
@@ -5532,13 +5535,73 @@ async def health_security(request: web.Request) -> web.Response:
             security_analysis["recommendations"].append("- Исправить формат заголовка Token на: Bearer <ваш_токен>")
         elif not token_analysis["token_valid"]:
             security_analysis["recommendations"].append("- Использовать валидный токен из списка разрешенных")
-        
+
         if not signature_header:
             security_analysis["recommendations"].append("- Добавить заголовок Signature с цифровой подписью")
         elif not signature_analysis["signature_valid"]:
             security_analysis["recommendations"].append("- Убедиться что подпись создана для правильного токена и временной метки")
             security_analysis["recommendations"].append("- Проверить что используется правильный приватный ключ для подписи")
-    
+
+    def serialize_dt(value):
+        if isinstance(value, datetime):
+            return value.isoformat(timespec='seconds')
+        return value
+
+    blocked_users_snapshot = {}
+    blocked_users_active = {}
+    blocked_users_expired = {}
+    blocked_users_summary = {
+        "runtime_ready": blocked_users is not None and blocked_user_lock is not None,
+        "cache_type": type(blocked_users).__name__ if blocked_users is not None else None,
+        "total_entries": 0,
+        "active_entries": 0,
+        "expired_entries": 0,
+        "max_cache_size": getattr(config, 'max_blocked_users_cache_size', None)
+    }
+
+    if blocked_user_lock is None:
+        blocked_user_lock = asyncio.Lock()
+
+    if blocked_users is None:
+        blocked_users = {}
+
+    now = datetime.now()
+
+    async with blocked_user_lock:
+        for key, item in blocked_users.items():
+            if isinstance(item, dict):
+                normalized_item = {
+                    "cache_key": item.get("cache_key") or key,
+                    "user_id": item.get("user_id"),
+                    "normalized_phone": item.get("normalized_phone"),
+                    "blocked_from": serialize_dt(item.get("blocked_from")),
+                    "blocked_until": serialize_dt(item.get("blocked_until")),
+                    "reason": item.get("reason"),
+                    "message": item.get("message"),
+                    "db_current_timestamp": serialize_dt(item.get("db_current_timestamp")),
+                    "clock_skew_seconds": item.get("clock_skew_seconds"),
+                    "updated_at": serialize_dt(item.get("updated_at"))
+                }
+
+                blocked_users_snapshot[key] = normalized_item
+
+                blocked_until = item.get("blocked_until")
+                if isinstance(blocked_until, datetime) and blocked_until > now:
+                    blocked_users_active[key] = normalized_item
+                else:
+                    blocked_users_expired[key] = normalized_item
+            else:
+                blocked_users_snapshot[key] = {
+                    "cache_key": key,
+                    "raw_value": str(item),
+                    "record_type": type(item).__name__
+                }
+                blocked_users_expired[key] = blocked_users_snapshot[key]
+
+    blocked_users_summary["total_entries"] = len(blocked_users_snapshot)
+    blocked_users_summary["active_entries"] = len(blocked_users_active)
+    blocked_users_summary["expired_entries"] = len(blocked_users_expired)
+
     # Формируем полный ответ
     security_data = {
         "status": "healthy" if not security_analysis["errors"] else "security_issues",
@@ -5557,7 +5620,7 @@ async def health_security(request: web.Request) -> web.Response:
                 "loaded": private_key is not None
             },
             "public_key": {
-                "path": config.client_public_key_path, 
+                "path": config.client_public_key_path,
                 "role": "client_verification",
                 "status": "available" if public_key_available else "unavailable",
                 "loaded": public_key is not None
@@ -5566,7 +5629,7 @@ async def health_security(request: web.Request) -> web.Response:
         "token_authentication": {
             "enabled": not config.disable_token_auth,
             "allowed_tokens_count": len(config.allowed_tokens),
-            "static_tokens": len([t for t in config.allowed_tokens if len(t) == 36]),  # UUID формата
+            "static_tokens": len([t for t in config.allowed_tokens if len(t) == 36]),
             "custom_tokens": len([t for t in config.allowed_tokens if len(t) != 36])
         },
         "signature_verification": {
@@ -5574,6 +5637,12 @@ async def health_security(request: web.Request) -> web.Response:
             "signature_ttl_seconds": config.signature_ttl,
             "client_signature_required": True,
             "server_signature_enabled": True
+        },
+        "blocked_users": {
+            "summary": blocked_users_summary,
+            "active": blocked_users_active,
+            "expired": blocked_users_expired,
+            "all_entries": blocked_users_snapshot
         },
         "security_mode": "secure" if not (config.disable_certificates and config.disable_token_auth and config.disable_signature) else "unsecure",
         "statistics": {
@@ -5584,11 +5653,10 @@ async def health_security(request: web.Request) -> web.Response:
         "server_time_unix": int(time.time()),
         "server_time_human": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
-    
+
     response = web.json_response(security_data)
     await add_server_signature_to_response(response, getattr(request, 'authenticated_token', 'health_security'))
     return response
-
 
 from datetime import datetime, timedelta  # ДОБАВИТЬ timedelta
 
