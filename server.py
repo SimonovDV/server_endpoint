@@ -6628,22 +6628,17 @@ async def get_tickets(request):
         Выполняет предварительную проверку блокировки пользователя ДО любого обращения к БД.
         Если пользователь заблокирован, запрос отклоняется без вызова db_userid, db_tickets
         и любых других функций доступа к БД.
+        Аутентификация повторно не выполняется, так как уже была выполнена в auth_middleware.
     """
     endpoint = '/ticket/list'
-
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
 
     try:
         data = await request.json()
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -6657,18 +6652,14 @@ async def get_tickets(request):
         except Exception as e:
             if verbose_mode:
                 print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return create_response(
+            return web.json_response(
                 {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                request_data={"endpoint": endpoint, "phone": phone},
-                endpoint=endpoint,
                 status=200
             )
 
     if user_id is None and normalized_phone is None:
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Не указан идентификатор пользователя"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -6682,10 +6673,8 @@ async def get_tickets(request):
 
     result = await db_tickets(data)
 
-    return create_response(
+    return web.json_response(
         result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
-        request_data={"endpoint": endpoint, "user_id": user_id, "phone": normalized_phone},
-        endpoint=endpoint,
         status=200
     )
 
