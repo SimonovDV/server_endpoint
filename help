@@ -5,8 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Secure Data Exchange Server - Справка</title>
     <script>
-        const API_IP = '172.18.29.218';
-        const API_PORT = '8000';
+        const CURRENT_URL = new URL(window.location.href);
+        const API_PROTOCOL = CURRENT_URL.protocol || 'http:';
+        const API_IP = CURRENT_URL.hostname;
+        const API_PORT = CURRENT_URL.port || (API_PROTOCOL === 'https:' ? '443' : '80');
+        const API_BASE = `${API_PROTOCOL}//${API_IP}${CURRENT_URL.port ? `:${API_PORT}` : ''}`;
 
     </script>
     <style>
@@ -861,6 +864,95 @@ body {
     margin-top: 20px;
 }
 
+
+.blocked-users-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.summary-card {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.summary-card .summary-label {
+    display: block;
+    font-size: 12px;
+    color: #6c757d;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.summary-card .summary-value {
+    font-size: 20px;
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+.table-responsive {
+    overflow-x: auto;
+    border: 1px solid #e9ecef;
+    border-radius: 8px;
+    background: white;
+}
+
+.health-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 900px;
+}
+
+.health-table th,
+.health-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #e9ecef;
+    text-align: left;
+    vertical-align: top;
+    font-size: 14px;
+}
+
+.health-table th {
+    background: #f8f9fa;
+    font-weight: 600;
+    color: #2c3e50;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.health-table tr:hover {
+    background: #f8fbff;
+}
+
+.table-empty {
+    padding: 16px;
+    color: #6c757d;
+    background: #f8f9fa;
+    border: 1px dashed #dee2e6;
+    border-radius: 8px;
+}
+
+.code-inline {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: #f1f3f5;
+    color: #495057;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+}
+
+.small-note {
+    margin-top: 10px;
+    color: #6c757d;
+    font-size: 13px;
+}
+
 .analysis-section {
     margin: 15px 0;
     padding: 15px;
@@ -1697,12 +1789,15 @@ body {
                                 <div id="request-analysis">
 
                                     <div class="analysis-section">
-                                        <h5>Рекомендации</h5>
-                                        <div id="security-recommendations">
-                                            <div class="recommendation">
-                                                Загрузка рекомендаций по безопасности...
+                                        <h5>Заблокированные пользователи</h5>
+                                        <div id="blocked-users-summary" class="blocked-users-summary">
+                                            <div class="summary-card">
+                                                <span class="summary-label">Всего записей</span>
+                                                <span class="summary-value">...</span>
                                             </div>
                                         </div>
+                                        <div id="blocked-users-table-container" class="table-empty">Загрузка...</div>
+                                        <div id="blocked-users-note" class="small-note"></div>
                                     </div>
                                 </div>
                             </div>
@@ -5154,8 +5249,11 @@ Signature: base64-encoded-rsa-signature
 
 
 
+        let currentSystemTab = 'overview-tab';
+
         // Функция для переключения вкладок состояния системы
         function openTab(tabName) {
+            currentSystemTab = tabName;
             // Скрыть все вкладки
             const tabContents = document.querySelectorAll('.tab-content');
             tabContents.forEach(tab => {
@@ -5182,6 +5280,10 @@ Signature: base64-encoded-rsa-signature
             );
             if (targetButton) {
                 targetButton.classList.add('active');
+            }
+
+            if (tabName === 'security-tab') {
+                loadSecurityData(`_=${Date.now()}`);
             }
         }
 
@@ -5214,7 +5316,7 @@ Signature: base64-encoded-rsa-signature
 
 
             try {
-                const url = `http://${API_IP}:${API_PORT}/health${cacheBuster ? `?${cacheBuster}` : ''}`;
+                const url = `${getApiUrl('/health')}${cacheBuster ? `?${cacheBuster}` : ''}`;
                 const response = await fetch(url, {
                     method: 'GET',
                     headers: {
@@ -5358,7 +5460,7 @@ Signature: base64-encoded-rsa-signature
 // Загрузка данных основного health эндпоинта
         async function loadHealthData(cacheBuster = '') {
             try {
-                const url = `http://${API_IP}:${API_PORT}/health${cacheBuster ? `?${cacheBuster}` : ''}`;
+                const url = `${getApiUrl('/health')}${cacheBuster ? `?${cacheBuster}` : ''}`;
                 const response = await fetch(url, {
                     method: 'GET',
                     headers: {
@@ -5380,7 +5482,7 @@ Signature: base64-encoded-rsa-signature
         // Загрузка данных безопасности
         async function loadSecurityData(cacheBuster = '') {
             try {
-                const url = `http://${API_IP}:${API_PORT}/health/security${cacheBuster ? `?${cacheBuster}` : ''}`;
+                const url = `${getApiUrl('/health/security')}${cacheBuster ? `?${cacheBuster}` : ''}`;
                 const response = await fetch(url, {
                     method: 'GET',
                     headers: {
@@ -5388,21 +5490,49 @@ Signature: base64-encoded-rsa-signature
                         'Pragma': 'no-cache'
                     }
                 });
-                if (!response.ok) return;
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 
                 const data = await response.json();
                 updateSecurityTab(data);
+                renderBlockedUsers(data);
                 
             } catch (error) {
                 console.error('Ошибка загрузки security данных:', error);
+                updateSecurityTabWithError(error.message);
             }
         }
 
+        function updateSecurityTabWithError(errorMessage) {
+            const blockedSummary = document.getElementById('blocked-users-summary');
+            const blockedTable = document.getElementById('blocked-users-table-container');
+            const blockedNote = document.getElementById('blocked-users-note');
+
+            if (blockedSummary) {
+                blockedSummary.innerHTML = `
+                    <div class="summary-card">
+                        <span class="summary-label">Статус загрузки</span>
+                        <span class="summary-value">Ошибка</span>
+                    </div>
+                `;
+            }
+
+            if (blockedTable) {
+                blockedTable.className = 'table-empty';
+                blockedTable.innerHTML = `Не удалось загрузить список заблокированных пользователей: ${escapeHtml(errorMessage)}`;
+            }
+
+            if (blockedNote) {
+                blockedNote.textContent = 'Проверьте доступность эндпоинта /health/security.';
+            }
+        }
 
         // Загрузка данных базы данных
         async function loadDatabaseData(cacheBuster = '') {
             try {
-                const url = `http://${API_IP}:${API_PORT}/health/database${cacheBuster ? `?${cacheBuster}` : ''}`;
+                const url = `${getApiUrl('/health/database')}${cacheBuster ? `?${cacheBuster}` : ''}`;
                 const response = await fetch(url, {
                     method: 'GET',
                     headers: {
@@ -5500,7 +5630,7 @@ Signature: base64-encoded-rsa-signature
         // Загрузка данных логирования
         async function loadLoggingData(cacheBuster = '') {
             try {
-                const url = `http://${API_IP}:${API_PORT}/health/logging${cacheBuster ? `?${cacheBuster}` : ''}`;
+                const url = `${getApiUrl('/health/logging')}${cacheBuster ? `?${cacheBuster}` : ''}`;
                 const response = await fetch(url, {
                     method: 'GET',
                     headers: {
@@ -5522,7 +5652,7 @@ Signature: base64-encoded-rsa-signature
         // Загрузка сетевых данных
         async function loadNetworkData(cacheBuster = '') {
             try {
-                const url = `http://${API_IP}:${API_PORT}/health/network${cacheBuster ? `?${cacheBuster}` : ''}`;
+                const url = `${getApiUrl('/health/network')}${cacheBuster ? `?${cacheBuster}` : ''}`;
                 const response = await fetch(url, {
                     method: 'GET',
                     headers: {
@@ -5543,7 +5673,7 @@ Signature: base64-encoded-rsa-signature
 
         async function loadCloudData(cacheBuster = '') {
             try {
-                const url = `http://${API_IP}:${API_PORT}/health/cloud${cacheBuster ? `?${cacheBuster}` : ''}`;
+                const url = `${getApiUrl('/health/cloud')}${cacheBuster ? `?${cacheBuster}` : ''}`;
                 const response = await fetch(url, {
                     method: 'GET',
                     headers: {
@@ -5565,7 +5695,7 @@ Signature: base64-encoded-rsa-signature
         // Загрузка данных статистики
         async function loadStatisticsData(cacheBuster = '') {
             try {
-                const url = `http://${API_IP}:${API_PORT}/health/stat${cacheBuster ? `?${cacheBuster}` : ''}`;
+                const url = `${getApiUrl('/health/stat')}${cacheBuster ? `?${cacheBuster}` : ''}`;
                 const response = await fetch(url, {
                     method: 'GET',
                     headers: {
@@ -5777,56 +5907,50 @@ Signature: base64-encoded-rsa-signature
 
         // Обновление вкладки безопасности
         function updateSecurityTab(data) {
-            // Маркеры для безопасности
             updateStatusIndicator('auth-status-indicator', 
-                data.token_authentication.enabled && data.signature_verification.enabled ? 'healthy' : 'warning');
+                data?.token_authentication?.enabled && data?.signature_verification?.enabled ? 'healthy' : 'warning');
             
             updateStatusIndicator('keys-status-indicator', 
-                data.certificates.private_key.status === 'available' && data.certificates.public_key.status === 'available' ? 'healthy' : 'unhealthy');            
-            // Аутентификация
-            document.getElementById('auth-details').innerHTML = `
-                <div class="health-detail">
-                    <span class="label">Токены:</span>
-                    <span class="value">${data.token_authentication.allowed_tokens_count} разрешено</span>
-                </div>
-                <div class="health-detail">
-                    <span class="label">Подписи:</span>
-                    <span class="value">${data.signature_verification.enabled ? 'Включены' : 'Отключены'}</span>
-                </div>
-                <div class="health-detail">
-                    <span class="label">TTL подписей:</span>
-                    <span class="value">${data.signature_verification.signature_ttl_seconds} сек</span>
-                </div>
-            `;
+                data?.certificates?.private_key?.status === 'available' && data?.certificates?.public_key?.status === 'available' ? 'healthy' : 'unhealthy');
 
+            const authDetails = document.getElementById('auth-details');
+            if (authDetails) {
+                authDetails.innerHTML = `
+                    <div class="health-detail">
+                        <span class="label">Токены:</span>
+                        <span class="value">${data?.token_authentication?.allowed_tokens_count ?? 0} разрешено</span>
+                    </div>
+                    <div class="health-detail">
+                        <span class="label">Подписи:</span>
+                        <span class="value">${data?.signature_verification?.enabled ? 'Включены' : 'Отключены'}</span>
+                    </div>
+                    <div class="health-detail">
+                        <span class="label">TTL подписей:</span>
+                        <span class="value">${data?.signature_verification?.signature_ttl_seconds ?? 'Н/Д'} сек</span>
+                    </div>
+                `;
+            }
 
-            // Ключи безопасности
-            document.getElementById('keys-details').innerHTML = `
-                <div class="health-detail">
-                    <span class="label">Приватный ключ:</span>
-                    <span class="value">${data.certificates.private_key.status}</span>
-                </div>
-                <div class="health-detail">
-                    <span class="label">Публичный ключ:</span>
-                    <span class="value">${data.certificates.public_key.status}</span>
-                </div>
-                <div class="health-detail">
-                    <span class="label">Статус:</span>
-                    <span class="value">${data.certificates.enabled ? 'Активны' : 'Отключены'}</span>
-                </div>
-            `;
-
-
-            // Рекомендации
-            if (data.request_analysis?.security_diagnostics?.recommendations) {
-                const recommendations = data.request_analysis.security_diagnostics.recommendations;
-                let recommendationsHtml = '';
-                
-                recommendations.forEach(rec => {
-                    recommendationsHtml += `<div class="recommendation">${rec}</div>`;
-                });
-                
-                document.getElementById('security-recommendations').innerHTML = recommendationsHtml;
+            const keysDetails = document.getElementById('keys-details');
+            if (keysDetails) {
+                keysDetails.innerHTML = `
+                    <div class="health-detail">
+                        <span class="label">Приватный ключ:</span>
+                        <span class="value">${data?.certificates?.private_key?.status || 'Н/Д'}</span>
+                    </div>
+                    <div class="health-detail">
+                        <span class="label">Публичный ключ:</span>
+                        <span class="value">${data?.certificates?.public_key?.status || 'Н/Д'}</span>
+                    </div>
+                    <div class="health-detail">
+                        <span class="label">Статус:</span>
+                        <span class="value">${data?.certificates?.enabled ? 'Активны' : 'Отключены'}</span>
+                    </div>
+                    <div class="health-detail">
+                        <span class="label">Режим безопасности:</span>
+                        <span class="value">${data?.security_mode || 'Н/Д'}</span>
+                    </div>
+                `;
             }
         }
 
@@ -6091,23 +6215,23 @@ Signature: base64-encoded-rsa-signature
             document.getElementById('endpoints-list').innerHTML = `
                 <div class="health-detail">
                     <span class="label">GET /health:</span>
-                    <span class="value">http://${API_IP}:${API_PORT}/health</span>
+                    <span class="value">${getApiUrl('/health')}</span>
                 </div>
                 <div class="health-detail">
                     <span class="label">GET /health/security:</span>
-                    <span class="value">http://${API_IP}:${API_PORT}/health/security</span>
+                    <span class="value">${getApiUrl('/health/security')}</span>
                 </div>
                 <div class="health-detail">
                     <span class="label">GET /health/database:</span>
-                    <span class="value">http://${API_IP}:${API_PORT}/health/database</span>
+                    <span class="value">${getApiUrl('/health/database')}</span>
                 </div>
                 <div class="health-detail">
                     <span class="label">GET /health/logging:</span>
-                    <span class="value">http://${API_IP}:${API_PORT}/health/logging</span>
+                    <span class="value">${getApiUrl('/health/logging')}</span>
                 </div>
                 <div class="health-detail">
                     <span class="label">GET /health/network:</span>
-                    <span class="value">http://${API_IP}:${API_PORT}/health/network</span>
+                    <span class="value">${getApiUrl('/health/network')}</span>
                 </div>
                 <div class="health-detail">
                     <span class="label">POST /user/by-phone:</span>
@@ -6684,8 +6808,151 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 
+
+function getApiUrl(path) {
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    return `${API_BASE}${normalizedPath}`;
+}
+
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function formatDateTime(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return escapeHtml(value);
+    return date.toLocaleString('ru-RU');
+}
+
+function formatNumber(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    return new Intl.NumberFormat('ru-RU').format(value);
+}
+
+function renderValue(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    if (typeof value === 'boolean') return value ? 'Да' : 'Нет';
+    if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '—';
+    if (typeof value === 'object') return `<code class="code-inline">${escapeHtml(JSON.stringify(value))}</code>`;
+    return escapeHtml(String(value));
+}
+
+function renderBlockedUsers(data) {
+    const summary = data?.blocked_users?.summary || {};
+    const allEntriesObject = data?.blocked_users?.all_entries || {};
+    const activeEntriesObject = data?.blocked_users?.active || {};
+    const expiredEntriesObject = data?.blocked_users?.expired || {};
+    const entries = Object.values(allEntriesObject).sort((a, b) => {
+        const dateA = new Date(a?.blocked_from || a?.updated_at || 0).getTime();
+        const dateB = new Date(b?.blocked_from || b?.updated_at || 0).getTime();
+        return dateB - dateA;
+    });
+
+    const summaryElement = document.getElementById('blocked-users-summary');
+    const tableContainer = document.getElementById('blocked-users-table-container');
+    const noteElement = document.getElementById('blocked-users-note');
+
+    if (!summaryElement || !tableContainer || !noteElement) {
+        return;
+    }
+
+    summaryElement.innerHTML = `
+        <div class="summary-card">
+            <span class="summary-label">Всего записей</span>
+            <span class="summary-value">${formatNumber(summary.total_entries ?? entries.length)}</span>
+        </div>
+        <div class="summary-card">
+            <span class="summary-label">Активных блокировок</span>
+            <span class="summary-value">${formatNumber(summary.active_entries ?? Object.keys(activeEntriesObject).length)}</span>
+        </div>
+        <div class="summary-card">
+            <span class="summary-label">Истёкших записей</span>
+            <span class="summary-value">${formatNumber(summary.expired_entries ?? Object.keys(expiredEntriesObject).length)}</span>
+        </div>
+        <div class="summary-card">
+            <span class="summary-label">Тип кеша</span>
+            <span class="summary-value">${renderValue(summary.cache_type)}</span>
+        </div>
+        <div class="summary-card">
+            <span class="summary-label">Готовность runtime</span>
+            <span class="summary-value">${renderValue(summary.runtime_ready)}</span>
+        </div>
+        <div class="summary-card">
+            <span class="summary-label">Лимит кеша</span>
+            <span class="summary-value">${formatNumber(summary.max_cache_size)}</span>
+        </div>
+    `;
+
+    if (!entries.length) {
+        tableContainer.className = 'table-empty';
+        tableContainer.innerHTML = 'Сейчас нет заблокированных пользователей.';
+        noteElement.innerHTML = `Источник: <code class="code-inline">/health/security</code>. Данные обновляются автоматически.`;
+        return;
+    }
+
+    const rows = entries.map(entry => {
+        const cacheKey = entry?.cache_key || '';
+        const isActive = Object.prototype.hasOwnProperty.call(activeEntriesObject, cacheKey)
+            ? 'Активна'
+            : (Object.prototype.hasOwnProperty.call(expiredEntriesObject, cacheKey) ? 'Истекла' : 'Неизвестно');
+
+        return `
+            <tr>
+                <td><code class="code-inline">${escapeHtml(cacheKey || '—')}</code></td>
+                <td>${renderValue(entry?.user_id)}</td>
+                <td>${renderValue(entry?.normalized_phone)}</td>
+                <td>${formatDateTime(entry?.blocked_from)}</td>
+                <td>${formatDateTime(entry?.blocked_until)}</td>
+                <td>${renderValue(entry?.reason)}</td>
+                <td>${renderValue(entry?.message)}</td>
+                <td>${formatDateTime(entry?.updated_at)}</td>
+                <td>${formatDateTime(entry?.db_current_timestamp)}</td>
+                <td>${renderValue(entry?.clock_skew_seconds)}</td>
+                <td>${isActive}</td>
+            </tr>
+        `;
+    }).join('');
+
+    tableContainer.className = 'table-responsive';
+    tableContainer.innerHTML = `
+        <table class="health-table">
+            <thead>
+                <tr>
+                    <th>Ключ</th>
+                    <th>User ID</th>
+                    <th>Телефон</th>
+                    <th>Заблокирован с</th>
+                    <th>Заблокирован до</th>
+                    <th>Причина</th>
+                    <th>Сообщение</th>
+                    <th>Обновлено</th>
+                    <th>Время БД</th>
+                    <th>Смещение часов</th>
+                    <th>Статус</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        </table>
+    `;
+
+    noteElement.innerHTML = `Список отсортирован по дате блокировки по убыванию. Источник: <code class="code-inline">/health/security</code>. Данные обновляются автоматически.`;
+}
+
+
 // Автоматическое обновление статуса каждые 30 секунд
-setInterval(loadAllHealthData, 30000);
+setInterval(() => {
+    loadAllHealthData();
+    if (currentSystemTab === 'security-tab') {
+        loadSecurityData(`_=${Date.now()}`);
+    }
+}, 30000);
     </script>
 </body>
 </html>
