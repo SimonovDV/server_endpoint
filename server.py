@@ -1858,7 +1858,68 @@ async def authenticate_request(request: web.Request) -> str:
     
     return token
 
+def is_password_change_endpoint(path: str) -> bool:
+    """
+    Название: is_password_change_endpoint
+    Назначение: Определение, относится ли путь к разрешенному сценарию смены пароля во время блокировки
+    Описание:
+        Возвращает True только для эндпоинтов смены пароля.
+        Все остальные запросы заблокированного пользователя должны отклоняться.
+    """
+    if not path:
+        return False
 
+    normalized_path = str(path).strip().lower()
+
+    allowed_password_change_paths = {
+        '/user/password',
+        '/user/password/change',
+        '/user/set-password',
+        '/password/change',
+    }
+
+    return normalized_path in allowed_password_change_paths
+
+async def extract_request_user_identity(request: web.Request) -> dict:
+    """
+    Название: extract_request_user_identity
+    Назначение: Безопасное извлечение идентификаторов пользователя из запроса
+    Описание:
+        Пытается извлечь user_id и/или phone из JSON тела запроса без выброса исключения наружу.
+        Используется в auth_middleware для централизованной проверки блокировки.
+    """
+    result = {
+        "user_id": None,
+        "phone": None,
+        "normalized_phone": None
+    }
+
+    try:
+        if request.method not in ('POST', 'PUT', 'PATCH'):
+            return result
+
+        if request.can_read_body:
+            data = await request.json()
+        else:
+            return result
+
+        if not isinstance(data, dict):
+            return result
+
+        result["user_id"] = data.get('user_id') or data.get('id')
+        result["phone"] = data.get('phone')
+
+        if result["phone"]:
+            try:
+                result["normalized_phone"] = normalize_phone(result["phone"])
+            except Exception:
+                result["normalized_phone"] = None
+
+        return result
+
+    except Exception:
+        return result
+    
 # --- РАБОТА С БАЗОЙ ДАННЫХ MSSQL ---
 
 async def init_database():
@@ -2883,7 +2944,8 @@ async def db_login(phone: str, hashed_password: str):
     def _execute_login():
         cursor = db_connection.cursor()
         try:
-            """""
+            """
+            не удалять ! временная заглушка
             cursor.execute(
                 "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?",
                 phone,
@@ -5128,13 +5190,11 @@ async def cors_middleware(app, handler):
 async def auth_middleware(app, handler):
     """
     Название: auth_middleware
-    Назначение: Middleware для аутентификации и сквозного логирования запросов с гарантированной серверной подписью и токеном
-    Описание: Обрабатывает все входящие запросы: аутентификация, логирование, обработка ошибок и гарантированное добавление серверной подписи и токена ко всем ответам
-    Принцип работы: Перехватывает запросы, выполняет аутентификацию, логирование, обработку исключений и добавляет серверную подпись и токен ко всем ответам независимо от статуса
-    Входящие параметры:
-        app - объект приложения aiohttp
-        handler - следующий обработчик в цепочке middleware
-    Исходящие параметры: Функция-обработчик middleware
+    Назначение: Middleware для аутентификации, централизованной проверки блокировки и сквозного логирования
+    Описание:
+        Обрабатывает все входящие запросы: аутентификация, централизованная проверка блокировки пользователя,
+        логирование, обработка исключений и гарантированное добавление серверной подписи и токена ко всем ответам.
+        Разблокировка допускается только по истечению времени блокировки или в сценарии смены пароля.
     """
     async def middleware_handler(request: web.Request) -> web.Response:
         request_id = await store_request(request)
@@ -5169,6 +5229,28 @@ async def auth_middleware(app, handler):
 
                 await add_server_signature_to_response(response, token_for_signature)
                 return response
+
+            # Централизованная проверка блокировки пользователя на всем сервере.
+            # Разрешается только сценарий смены пароля.
+            if not request.path.startswith('/health') and not is_password_change_endpoint(request.path):
+                identity = await extract_request_user_identity(request)
+                user_id = identity.get("user_id")
+                normalized_phone = identity.get("normalized_phone")
+
+                if user_id is not None or normalized_phone is not None:
+                    blocked_response = await ensure_user_request_not_blocked(
+                        user_id=user_id,
+                        phone=normalized_phone,
+                        endpoint=request.path
+                    )
+                    if blocked_response is not None:
+                        try:
+                            security_stats["user_blocking_statistics"]["blocked_requests_denied"] += 1
+                        except Exception:
+                            pass
+
+                        await add_server_signature_to_response(blocked_response, authenticated_token)
+                        return blocked_response
 
             if request.path == '/favicon.ico':
                 response = web.HTTPNotFound(
@@ -5249,7 +5331,6 @@ async def auth_middleware(app, handler):
             asyncio.create_task(log_request_async(request, response, processing_time, error, request_id))
 
     return middleware_handler
-
 
 async def debug_logging_system(request: web.Request, response: web.Response):
     """Временная функция для отладки системы логирования"""
