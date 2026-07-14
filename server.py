@@ -6312,8 +6312,7 @@ async def get_user_by_phone_legacy(request):
         request_data={"endpoint": endpoint, "phone": normalized_phone},
         endpoint=endpoint,
         status=200
-    )
-    
+    )    
 async def get_user_by_phone(request):
     """
     Название: get_user_by_phone
