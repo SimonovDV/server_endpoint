@@ -6321,12 +6321,9 @@ async def get_user_by_phone(request):
     Описание:
         Выполняет предварительную проверку блокировки пользователя по нормализованному
         номеру телефона ДО обращения к БД, как требует ТЗ.
+        Аутентификация повторно не выполняется, так как уже была выполнена в auth_middleware.
     """
     endpoint = '/user/by-phone'
-
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
 
     try:
         data = await request.json()
