@@ -6255,12 +6255,9 @@ async def get_user_by_phone_legacy(request):
     Получение пользователя по номеру телефона.
     Требование ТЗ: предварительно блокировать запрос без обращения к БД,
     если пользователь находится в активной блокировке.
+    Аутентификация повторно не выполняется, так как уже была выполнена в auth_middleware.
     """
     endpoint = '/user/by-phone'
-
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
 
     try:
         data = await request.json()
@@ -6293,7 +6290,10 @@ async def get_user_by_phone_legacy(request):
             status=200
         )
 
-    blocked_response = await ensure_user_request_not_blocked(phone=normalized_phone, endpoint=endpoint)
+    blocked_response = await ensure_user_request_not_blocked(
+        phone=normalized_phone,
+        endpoint=endpoint
+    )
     if blocked_response is not None:
         return blocked_response
 
