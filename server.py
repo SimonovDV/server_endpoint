@@ -6427,7 +6427,6 @@ async def get_user_by_phone(request):
     Описание:
         Выполняет предварительную проверку блокировки пользователя по нормализованному
         номеру телефона ДО обращения к БД, как требует ТЗ.
-        Аутентификация повторно не выполняется, так как уже была выполнена в auth_middleware.
     """
     endpoint = '/user/by-phone'
 
@@ -6436,19 +6435,15 @@ async def get_user_by_phone(request):
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
     phone = data.get('phone')
-    if not phone:
-        return create_response(
+    if not isinstance(phone, str) or not phone.strip():
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Поле phone обязательно"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -6457,10 +6452,8 @@ async def get_user_by_phone(request):
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка нормализации телефона", str(e))
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-            request_data={"endpoint": endpoint, "phone": phone},
-            endpoint=endpoint,
             status=200
         )
 
@@ -6471,28 +6464,30 @@ async def get_user_by_phone(request):
     if blocked_response is not None:
         return blocked_response
 
-    result = await db_userid(phone=normalized_phone)
+    result = await db_user_by_phone(normalized_phone)
 
     if result:
-        return create_response(
+        return web.json_response(
             {
                 "status": "success",
-                "code": 0,
-                "data": result
+                "code": 1,
+                "data": {
+                    "id": str(result.get("id") or result.get("user_id") or ""),
+                    "email": result.get("email"),
+                    "surname": result.get("surname"),
+                    "name": result.get("name"),
+                    "patronymic": result.get("patronymic")
+                }
             },
-            request_data={"endpoint": endpoint, "phone": normalized_phone},
-            endpoint=endpoint,
             status=200
         )
 
-    return create_response(
+    return web.json_response(
         {
             "status": "error",
-            "code": 404,
+            "code": 1,
             "message": "Пользователь не найден"
         },
-        request_data={"endpoint": endpoint, "phone": normalized_phone},
-        endpoint=endpoint,
         status=200
     )
 
