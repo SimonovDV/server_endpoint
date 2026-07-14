@@ -3419,44 +3419,212 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
             pass
         raise
 
-async def db_userid(user_id: str) -> bool:
+async def db_userid(phone: str) -> Optional[Dict[str, Any]]:
     """
     Название: db_userid
-    Назначение: Проверка существования пользователя по ID в базе данных
-    Описание: Выполняет запрос к таблице USR для проверки наличия пользователя с указанным ID
-    Принцип работы: Выполняет SQL запрос COUNT(*) и возвращает True если пользователь существует
-    Входящие параметры: user_id - идентификатор пользователя для проверки
-    Исходящие параметры: bool - True если пользователь существует, False если не существует
+    Назначение: Получение информации о пользователе по номеру телефона
+    Описание:
+        Выполняет двухэтапную операцию в соответствии с ТЗ:
+        1. EXECUTE [dbo].[USR_Insert] @USR_Phone = ? - получает или создает user_id
+        2. EXECUTE [dbo].[USR_Select] @USR_Id = ? - получает JSON с данными пользователя
+    Входящие параметры:
+        phone - нормализованный номер телефона
+    Исходящие параметры:
+        Dict[str, Any] | None - объект пользователя или None, если пользователь не найден
     """
     if not db_connection:
         raise Exception("База данных не доступна")
-    
+
     try:
-        query = "SELECT COUNT(*) FROM [DLK].[dbo].[USR] WHERE [USR_Id] = ?"
-        # Преобразуем user_id в bigint как ожидает процедура
-        user_id_int = int(user_id)
-        
+        normalized_phone = normalize_phone(phone)
+
         if verbose_mode:
-            print_status("INFO", f"Проверка существования пользователя", f"user_id: {user_id}")
-        
+            print_status("INFO", "Вызов хранимой процедуры USR_Insert", f"phone: {normalized_phone}")
+
         cursor = db_connection.cursor()
-        cursor.execute(query, (user_id_int,))
-        
-        result = cursor.fetchone()
-        count = result[0] if result else 0
-        
+        cursor.execute("SET LOCK_TIMEOUT 30000")
+
+        query_insert = "EXECUTE [dbo].[USR_Insert] @USR_Phone = ?"
+        cursor.execute(query_insert, (normalized_phone,))
+        inserted_user_id = cursor.fetchval()
+
+        if inserted_user_id is None:
+            cursor.close()
+            if verbose_mode:
+                print_status("ERROR", "USR_Insert не вернула идентификатор пользователя")
+            return None
+
+        try:
+            user_id_int = int(inserted_user_id)
+        except (ValueError, TypeError):
+            cursor.close()
+            raise Exception(f"USR_Insert вернула некорректный user_id: {inserted_user_id}")
+
+        if user_id_int <= 0:
+            cursor.close()
+            if verbose_mode:
+                print_status("ERROR", "USR_Insert вернула невалидный user_id", str(user_id_int))
+            return None
+
         if verbose_mode:
-            print_status("OK", f"Результат проверки пользователя {user_id}", f"найдено записей: {count}")
-        
-        # Возвращаем True если количество найденных записей > 0
-        return count > 0
-        
+            print_status("OK", "USR_Insert выполнена успешно", f"user_id: {user_id_int}")
+
+        query_select = "EXECUTE [dbo].[USR_Select] @USR_Id = ?"
+        cursor.execute(query_select, (user_id_int,))
+
+        raw_result = cursor.fetchval()
+
+        db_connection.commit()
+        cursor.close()
+
+        if raw_result is None:
+            if verbose_mode:
+                print_status("ERROR", "USR_Select не вернула данные", f"user_id: {user_id_int}")
+            return None
+
+        if isinstance(raw_result, int):
+            if raw_result == -1:
+                if verbose_mode:
+                    print_status("ERROR", "USR_Select вернула код ошибки -1", f"user_id: {user_id_int}")
+                return None
+
+        if isinstance(raw_result, str):
+            raw_result = raw_result.strip()
+            if not raw_result:
+                return None
+
+            try:
+                parsed = json.loads(raw_result)
+            except Exception as e:
+                raise Exception(f"Не удалось распарсить JSON из USR_Select: {e}")
+
+            if isinstance(parsed, list):
+                if not parsed:
+                    return None
+                user_data = parsed[0]
+            elif isinstance(parsed, dict):
+                user_data = parsed
+            else:
+                raise Exception("USR_Select вернула JSON в неподдерживаемом формате")
+
+            if not isinstance(user_data, dict):
+                raise Exception("Данные пользователя из USR_Select имеют неверный формат")
+
+            user_data["id"] = str(user_data.get("id") or user_data.get("user_id") or user_id_int)
+            return user_data
+
+        raise Exception(f"USR_Select вернула неподдерживаемый тип результата: {type(raw_result).__name__}")
+
+    except pyodbc.OperationalError as e:
+        if "timeout" in str(e).lower():
+            print_status("ERROR", "Таймаут выполнения USR_Insert/USR_Select", f"phone: {phone}")
+            try:
+                db_connection.rollback()
+            except Exception:
+                pass
+            raise Exception(f"Таймаут выполнения операции поиска пользователя: {str(e)}")
+        else:
+            print_status("ERROR", f"Операционная ошибка БД при поиске пользователя по телефону {phone}", str(e))
+            try:
+                db_connection.rollback()
+            except Exception:
+                pass
+            raise
+
     except pyodbc.Error as e:
-        print_status("ERROR", f"Ошибка базы данных при проверке пользователя {user_id}", str(e))
+        print_status("ERROR", f"Ошибка базы данных при поиске пользователя по телефону {phone}", str(e))
+        try:
+            db_connection.rollback()
+        except Exception:
+            pass
         raise
+
     except Exception as e:
-        print_status("ERROR", f"Неожиданная ошибка при проверке пользователя {user_id}", str(e))
+        print_status("ERROR", f"Неожиданная ошибка при поиске пользователя по телефону {phone}", str(e))
+        try:
+            db_connection.rollback()
+        except Exception:
+            pass
         raise
+
+async def get_user_by_phone(request):
+    """
+    Название: get_user_by_phone
+    Назначение: Получение информации о пользователе по номеру телефона
+    Описание:
+        Выполняет предварительную проверку блокировки пользователя по нормализованному
+        номеру телефона ДО обращения к БД, как требует ТЗ.
+        Если пользователь не заблокирован, возвращает данные пользователя
+        в формате, совместимом с инструкцией POST /user/by-phone.
+    """
+    endpoint = '/user/by-phone'
+
+    try:
+        data = await request.json()
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", "Ошибка парсинга JSON", str(e))
+        return create_response(
+            {"status": "error", "code": 400, "message": "Некорректный JSON"},
+            request_data={"endpoint": endpoint},
+            endpoint=endpoint,
+            status=200
+        )
+
+    phone = data.get('phone')
+    if not isinstance(phone, str) or not phone.strip():
+        return create_response(
+            {"status": "error", "code": 400, "message": "Поле phone обязательно"},
+            request_data={"endpoint": endpoint},
+            endpoint=endpoint,
+            status=200
+        )
+
+    try:
+        normalized_phone = normalize_phone(phone)
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", "Ошибка нормализации телефона", str(e))
+        return create_response(
+            {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
+            request_data={"endpoint": endpoint, "phone": phone},
+            endpoint=endpoint,
+            status=200
+        )
+
+    blocked_response = await ensure_user_request_not_blocked(
+        phone=normalized_phone,
+        endpoint=endpoint
+    )
+    if blocked_response is not None:
+        return blocked_response
+
+    result = await db_userid(phone=normalized_phone)
+
+    if result:
+        return create_response(
+            {
+                "status": "success",
+                "code": 1,
+                "data": {
+                    "id": str(result.get("id") or result.get("user_id") or ""),
+                    "email": result.get("email"),
+                    "surname": result.get("surname"),
+                    "name": result.get("name"),
+                    "patronymic": result.get("patronymic")
+                }
+            },
+            request_data={"endpoint": endpoint, "phone": normalized_phone},
+            endpoint=endpoint,
+            status=200
+        )
+
+    return create_response(
+        {"status": "error", "code": 1, "message": "Пользователь не найден"},
+        request_data={"endpoint": endpoint, "phone": normalized_phone},
+        endpoint=endpoint,
+        status=200
+    )
 
 async def db_useremailing(user_id: int, consent_to_mailing: bool) -> bool:
     """
