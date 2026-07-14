@@ -2321,13 +2321,15 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
 async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
     """
     Название: db_user_by_phone
-    Назначение: Получение данных пользователя по телефону из базы данных через хранимые процедуры
+    Назначение: Получение данных пользователя по телефону из базы данных через хранимую процедуру
     Описание:
         Сначала вызывает USR_Insert для регистрации/получения пользователя,
-        затем USR_Select для получения полных данных пользователя.
-        Поддерживает два формата ответа USR_Select:
-        1. JSON-строка в первом столбце
-        2. Обычный rowset с колонками пользователя
+        затем USR_Select для получения полных данных.
+        Поддерживает как JSON-ответ от USR_Select, так и обычный rowset.
+    Входящие параметры:
+        phone - телефон пользователя
+    Исходящие параметры:
+        Optional[Dict[str, Any]] - данные пользователя в виде словаря или None
     """
     if not db_connection:
         raise Exception("База данных не доступна")
@@ -2369,97 +2371,125 @@ async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
             print_status("INFO", "Процедура USR_Select выполнена", f"Получено результатов: {len(results)}")
 
         if not results:
+            if verbose_mode:
+                print_status("INFO", "Процедура USR_Select не вернула результаты")
             return None
 
-        first_row = results[0]
-        if not first_row:
+        result_row = results[0]
+        if not result_row:
             return None
 
-        # Вариант 1: процедура вернула одну колонку, где лежит JSON строка
-        if len(first_row) == 1:
-            first_value = list(first_row.values())[0]
+        json_data = None
 
-            if isinstance(first_value, (int, float)):
-                if int(first_value) == -1:
+        if len(result_row) == 1:
+            first_column_value = list(result_row.values())[0]
+
+            if verbose_mode:
+                print_status("INFO", f"Тип полученных данных: {type(first_column_value).__name__}")
+
+            if first_column_value is not None:
+                if isinstance(first_column_value, (int, float)):
+                    if int(first_column_value) == -1:
+                        if verbose_mode:
+                            print_status("WARNING", "Процедура USR_Select вернула ошибку", "ID = -1")
+                        return None
+                elif isinstance(first_column_value, str):
+                    json_data = first_column_value
                     if verbose_mode:
-                        print_status("WARNING", "USR_Select вернула ошибку", "ID = -1")
-                    return None
+                        print_status("INFO", f"Получены JSON данные длиной {len(json_data)} символов")
 
-            elif isinstance(first_value, str):
-                raw_json = first_value.strip()
-                if raw_json:
-                    parsed = json.loads(raw_json)
+        if json_data:
+            try:
+                parsed_data = json.loads(json_data)
 
-                    if isinstance(parsed, list):
-                        if not parsed:
-                            return None
-                        user_data = parsed[0]
-                    elif isinstance(parsed, dict):
-                        user_data = parsed
-                    else:
-                        return None
+                if isinstance(parsed_data, list) and len(parsed_data) > 0:
+                    user_data = parsed_data[0]
+                elif isinstance(parsed_data, dict):
+                    user_data = parsed_data
+                else:
+                    user_data = None
 
-                    if not isinstance(user_data, dict):
-                        return None
+                if isinstance(user_data, dict):
+                    user_data["id"] = str(
+                        user_data.get("id")
+                        or user_data.get("USR_Id")
+                        or user_data.get("user_id")
+                        or user_id
+                    )
+                    user_data["email"] = user_data.get("email") or user_data.get("USR_Email")
+                    user_data["surname"] = user_data.get("surname") or user_data.get("USR_Surname")
+                    user_data["name"] = user_data.get("name") or user_data.get("USR_Name")
+                    user_data["patronymic"] = user_data.get("patronymic") or user_data.get("USR_Patronymic")
 
-                    user_data["id"] = str(user_data.get("id") or user_data.get("user_id") or user_id)
+                    if verbose_mode:
+                        print_status("OK", "Найден пользователь",
+                                     f"ID: {user_data.get('id')}, Телефон: {normalized_phone}")
+
                     return user_data
+                else:
+                    if verbose_mode:
+                        print_status("WARNING", "Неверный формат JSON данных",
+                                     f"Получен: {type(parsed_data).__name__}")
 
-        # Вариант 2: процедура вернула обычный набор колонок
-        user_data = dict(first_row)
+            except json.JSONDecodeError as e:
+                if verbose_mode:
+                    print_status("ERROR", "Ошибка парсинга JSON из процедуры USR_Select", str(e))
+                    print(f"  JSON данные (первые 200 символов): {json_data[:200]}...")
+            except Exception as e:
+                if verbose_mode:
+                    print_status("ERROR", "Ошибка при обработке JSON данных", str(e))
 
-        if "id" not in user_data:
-            user_data["id"] = str(
-                user_data.get("USR_ID")
-                or user_data.get("user_id")
-                or user_id
-            )
-        else:
-            user_data["id"] = str(user_data["id"])
+        if verbose_mode:
+            print_status("INFO", "USR_Select вернула rowset, используем fallback")
+            print(f"  Результаты: {results}")
 
-        if "email" not in user_data:
-            user_data["email"] = user_data.get("USR_Email")
+        fallback_user = dict(result_row)
+        fallback_user["id"] = str(
+            fallback_user.get("id")
+            or fallback_user.get("USR_Id")
+            or fallback_user.get("user_id")
+            or user_id
+        )
+        fallback_user["email"] = fallback_user.get("email") or fallback_user.get("USR_Email")
+        fallback_user["surname"] = fallback_user.get("surname") or fallback_user.get("USR_Surname")
+        fallback_user["name"] = fallback_user.get("name") or fallback_user.get("USR_Name")
+        fallback_user["patronymic"] = fallback_user.get("patronymic") or fallback_user.get("USR_Patronymic")
 
-        if "surname" not in user_data:
-            user_data["surname"] = user_data.get("USR_Surname")
+        if verbose_mode:
+            print_status("OK", "Найден пользователь через rowset",
+                         f"ID: {fallback_user.get('id')}, Телефон: {normalized_phone}")
 
-        if "name" not in user_data:
-            user_data["name"] = user_data.get("USR_Name")
-
-        if "patronymic" not in user_data:
-            user_data["patronymic"] = user_data.get("USR_Patronymic")
-
-        return user_data
+        return fallback_user
 
     except pyodbc.OperationalError as e:
         if "timeout" in str(e).lower():
-            print_status("ERROR", "Таймаут выполнения USR_Select", f"phone: {normalized_phone}")
+            print_status("ERROR", "Таймаут выполнения хранимой процедуры", f"phone: {normalized_phone}")
             try:
                 db_connection.rollback()
-            except Exception:
+            except:
                 pass
             raise Exception(f"Таймаут выполнения операции поиска пользователя: {str(e)}")
         else:
-            print_status("ERROR", f"Операционная ошибка при поиске пользователя по телефону {normalized_phone}", str(e))
+            print_status("ERROR", f"Операционная ошибка при поиске пользователя {normalized_phone}", str(e))
             try:
                 db_connection.rollback()
-            except Exception:
+            except:
                 pass
             raise
 
     except pyodbc.Error as e:
-        print_status("ERROR", f"Ошибка базы данных при поиске пользователя по телефону {normalized_phone}", str(e))
+        print_status("ERROR", f"Ошибка базы данных при поиске пользователя {normalized_phone}", str(e))
         try:
             db_connection.rollback()
-        except Exception:
+        except:
             pass
         raise
 
     except Exception as e:
-        print_status("ERROR", f"Неожиданная ошибка при поиске пользователя по телефону {normalized_phone}", str(e))
+        print_status("ERROR", f"Неожиданная ошибка при поиске пользователя {normalized_phone}", str(e))
         try:
             db_connection.rollback()
-        except Exception:
+        except:
             pass
         raise
 
@@ -2468,9 +2498,8 @@ async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
             if cursor is not None:
                 cursor.close()
         except Exception:
-            pass
+            pass        
 
-        
 async def db_user_update(user_id: int, email: str, password: str) -> bool:
     """
     Название: db_user_update
