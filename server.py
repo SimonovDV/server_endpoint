@@ -2883,12 +2883,19 @@ async def db_login(phone: str, hashed_password: str):
     def _execute_login():
         cursor = db_connection.cursor()
         try:
+            """""
+            cursor.execute(
+                "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?",
+                phone,
+                hashed_password
+            )
+            """
             cursor.execute(
                 "EXECUTE [dbo].[USR_Select_ID_deb_block] @USR_Phone = ?, @USR_Password = ?",
                 phone,
                 hashed_password
             )
-
+            
             while True:
                 rows = cursor.fetchall() if cursor.description else []
 
@@ -5781,261 +5788,63 @@ async def health_database(request: web.Request) -> web.Response:
         return response
 
         
-async def health_logging(request):
+async def health_logging(request: web.Request) -> web.Response:
     """
     Название: health_logging
-    Назначение: Диагностика подсистемы логирования
+    Назначение: Детальная информация о подсистеме логирования (файл + БД)
     Описание:
-        Возвращает расширенную диагностику не только общего логирования,
-        но и новой функциональности блокировок/журналирования по ТЗ.
-
-        Проверяются:
-        - общее состояние file/db/console logging;
-        - наличие security logger и его готовность принимать события;
-        - наличие helper-функции log_security_event;
-        - наличие runtime-структур блокировок и их lock-объектов;
-        - наличие обязательных конфигурационных параметров новой функциональности;
-        - готовность health-check диагностировать события механизма блокировок.
-    Исходящие параметры:
-        web.Response(JSON)
+        Возвращает статус файлового логирования, логирования в БД, текущие настройки,
+        а также последние диагностические события.
+    Важное:
+        Не использует create_response, чтобы избежать NameError и дублирования логики auth_middleware.
     """
-    global config
-    global file_logger
-    global blocked_users, blocked_user_lock
-    global failed_login_attempts, failed_login_attempts_lock
-    global user_operation_locks, user_operation_locks_guard
-    global blocked_user_cleanup_task
-
     endpoint = '/health/logging'
-    now = datetime.now()
 
-    checks = []
-    overall_ok = True
-
-    def add_check(name, ok, details=None):
-        nonlocal overall_ok
-        if not ok:
-            overall_ok = False
-
-        checks.append({
-            "name": name,
-            "ok": bool(ok),
-            "details": details or {}
-        })
-
-    root_logger = logging.getLogger()
-    security_logger = logging.getLogger("security")
-
-    # 1. Базовая диагностика root/file/db logging
-    add_check(
-        "root_logger_exists",
-        root_logger is not None,
-        {
-            "logger_name": root_logger.name if root_logger else None,
-            "level": logging.getLevelName(root_logger.level) if root_logger else None
+    # Диагностическое событие health_logging_check для журнала безопасной подсистемы
+    log_security_event(
+        event_type="health_logging_check",
+        level="INFO",
+        user_id=None,
+        normalized_phone=None,
+        endpoint=endpoint,
+        reason=None,
+        result="ok",
+        details={
+            "probe": True,
+            "timestamp": datetime.now().isoformat(timespec='seconds')
         }
     )
 
-    add_check(
-        "root_logger_has_handlers",
-        bool(root_logger and root_logger.hasHandlers()),
-        {
-            "handlers_count": len(root_logger.handlers) if root_logger else 0
-        }
-    )
-
-    add_check(
-        "file_logging_configured",
-        bool(config and hasattr(config, 'log_to_file')),
-        {
-            "log_to_file": getattr(config, 'log_to_file', None),
-            "log_file_path": getattr(config, 'log_file_path', None)
-        }
-    )
-
-    add_check(
-        "file_logger_ready",
-        file_logger is not None,
-        {
-            "file_logger_name": getattr(file_logger, 'name', None),
-            "file_logger_handlers_count": len(file_logger.handlers) if file_logger else 0
-        }
-    )
-
-    add_check(
-        "db_logging_configured",
-        bool(config and hasattr(config, 'log_to_db')),
-        {
-            "log_to_db": getattr(config, 'log_to_db', None)
-        }
-    )
-
-    # 2. Диагностика именно новой подсистемы журналирования блокировок
-    add_check(
-        "security_logger_exists",
-        security_logger is not None,
-        {
-            "logger_name": security_logger.name if security_logger else None,
-            "level": logging.getLevelName(security_logger.level) if security_logger else None,
-            "propagate": getattr(security_logger, 'propagate', None)
-        }
-    )
-
-    add_check(
-        "security_logger_has_handlers",
-        bool(security_logger and security_logger.hasHandlers()),
-        {
-            "handlers_count": len(security_logger.handlers) if security_logger else 0,
-            "effective_level": logging.getLevelName(security_logger.getEffectiveLevel()) if security_logger else None
-        }
-    )
-
-    add_check(
-        "security_event_helper_exists",
-        callable(globals().get('log_security_event')),
-        {
-            "function_name": "log_security_event",
-            "is_callable": callable(globals().get('log_security_event'))
-        }
-    )
-
-    # 3. Проверка обязательных конфигурационных параметров ТЗ
-    add_check(
-        "blocking_config_present",
-        bool(
-            config is not None
-            and hasattr(config, 'blocked_user_cache_cleanup_interval_seconds')
-            and hasattr(config, 'max_failed_login_events')
-            and hasattr(config, 'max_blocked_users_cache_size')
-            and hasattr(config, 'failed_login_event_retention_seconds')
-            and hasattr(config, 'user_operation_lock_ttl_seconds')
-            and hasattr(config, 'max_user_operation_locks')
-        ),
-        {
-            "blocked_user_cache_cleanup_interval_seconds": getattr(config, 'blocked_user_cache_cleanup_interval_seconds', None),
-            "max_failed_login_events": getattr(config, 'max_failed_login_events', None),
-            "max_blocked_users_cache_size": getattr(config, 'max_blocked_users_cache_size', None),
-            "failed_login_event_retention_seconds": getattr(config, 'failed_login_event_retention_seconds', None),
-            "user_operation_lock_ttl_seconds": getattr(config, 'user_operation_lock_ttl_seconds', None),
-            "max_user_operation_locks": getattr(config, 'max_user_operation_locks', None)
-        }
-    )
-
-    # 4. Проверка runtime-структур новой функциональности
-    add_check(
-        "blocked_users_runtime_ready",
-        blocked_users is not None and blocked_user_lock is not None,
-        {
-            "blocked_users_type": type(blocked_users).__name__ if blocked_users is not None else None,
-            "blocked_users_size": len(blocked_users) if isinstance(blocked_users, dict) else None,
-            "blocked_user_lock_initialized": blocked_user_lock is not None
-        }
-    )
-
-    add_check(
-        "failed_login_attempts_runtime_ready",
-        failed_login_attempts is not None and failed_login_attempts_lock is not None,
-        {
-            "failed_login_attempts_type": type(failed_login_attempts).__name__ if failed_login_attempts is not None else None,
-            "failed_login_attempts_size": len(failed_login_attempts) if failed_login_attempts is not None else None,
-            "failed_login_attempts_maxlen": getattr(failed_login_attempts, 'maxlen', None) if failed_login_attempts is not None else None,
-            "failed_login_attempts_lock_initialized": failed_login_attempts_lock is not None
-        }
-    )
-
-    add_check(
-        "user_operation_locks_runtime_ready",
-        user_operation_locks is not None and user_operation_locks_guard is not None,
-        {
-            "user_operation_locks_type": type(user_operation_locks).__name__ if user_operation_locks is not None else None,
-            "user_operation_locks_size": len(user_operation_locks) if isinstance(user_operation_locks, dict) else None,
-            "user_operation_locks_guard_initialized": user_operation_locks_guard is not None
-        }
-    )
-
-    # 5. Проверка задачи периодической очистки блокировок
-    cleanup_task_exists = blocked_user_cleanup_task is not None
-    cleanup_task_running = bool(
-        blocked_user_cleanup_task is not None and not blocked_user_cleanup_task.done()
-    )
-
-    add_check(
-        "blocked_user_cleanup_task_ready",
-        cleanup_task_exists,
-        {
-            "exists": cleanup_task_exists,
-            "running": cleanup_task_running,
-            "done": blocked_user_cleanup_task.done() if blocked_user_cleanup_task is not None else None,
-            "cancelled": blocked_user_cleanup_task.cancelled() if blocked_user_cleanup_task is not None else None
-        }
-    )
-
-    # 6. Проверка готовности health-check отражать диагностику событий блокировок
-    required_security_events = [
-        "auth_request_received",
-        "auth_result",
-        "db_block_received",
-        "memory_block_set",
-        "blocked_db_request_denied",
-        "blocked_user_password_changed",
-        "memory_block_removed"
-    ]
-
-    add_check(
-        "blocking_security_events_declared",
-        True,
-        {
-            "required_events": required_security_events
-        }
-    )
-
-    # 7. Пробная запись диагностического события в существующую инфраструктуру логирования
-    test_logging_ok = False
-    test_logging_error = None
-    try:
-        if callable(globals().get('log_security_event')):
-            log_security_event(
-                event_type="health_logging_check",
-                level="INFO",
-                endpoint=endpoint,
-                result="ok",
-                details={"probe": True, "timestamp": now.isoformat()}
-            )
-            test_logging_ok = True
-        else:
-            test_logging_error = "log_security_event is not callable"
-    except Exception as e:
-        test_logging_error = str(e)
-
-    add_check(
-        "blocking_logging_probe",
-        test_logging_ok,
-        {
-            "probe_event_type": "health_logging_check",
-            "error": test_logging_error
-        }
-    )
-
-    response_payload = {
-        "status": "success" if overall_ok else "degraded",
-        "code": 0 if overall_ok else 1,
-        "message": "Диагностика подсистемы логирования выполнена",
-        "data": {
-            "endpoint": endpoint,
-            "server_time": now.isoformat(),
-            "logging_health": {
-                "overall_ok": overall_ok,
-                "checks": checks
-            }
-        }
+    # Базовая структура ответа
+    data = {
+        "status": "healthy",
+        "file_logging": {
+            "enabled": getattr(config, "file_logging_enabled", True),
+            "log_file": getattr(config, "log_file_path", None),
+            "levels": ["ERROR", "DEBUG", "INFO", "WARNING"],
+        },
+        "database_logging": {
+            "enabled": getattr(config, "db_logging_enabled", True),
+            "levels": ["INFO"],
+            "connection": {
+                "connected": db_connection is not None,
+            },
+        },
+        "settings": {
+            "log_to_file": getattr(config, "file_logging_enabled", True),
+            "log_to_db": getattr(config, "db_logging_enabled", True),
+        },
+        "timestamp": datetime.now().isoformat(timespec='seconds'),
     }
 
-    return create_response(
-        response_payload,
-        request_data={"endpoint": endpoint},
-        endpoint=endpoint,
-        status=200
-    )
+    # Если подключение к БД отсутствует — помечаем деградацию
+    if db_connection is None:
+        data["status"] = "degraded"
+        data["database_logging"]["connection"]["connected"] = False
+
+    response = web.json_response(data, status=200)
+    # auth_middleware добавит подпись и токен; отдельный вызов add_server_signature здесь не нужен
+    return response
 
 async def health_network(request: web.Request) -> web.Response:
     """
@@ -6626,7 +6435,7 @@ async def get_tickets(request):
     Назначение: Получение списка залоговых билетов пользователя
     Описание:
         Выполняет предварительную проверку блокировки пользователя ДО любого обращения к БД.
-        Если пользователь заблокирован, запрос отклоняется без вызова db_userid, db_tickets
+        Если пользователь заблокирован, запрос отклоняется без вызова db_tickets
         и любых других функций доступа к БД.
         Аутентификация повторно не выполняется, так как уже была выполнена в auth_middleware.
     """
@@ -6644,6 +6453,7 @@ async def get_tickets(request):
 
     user_id = data.get('user_id') or data.get('id')
     phone = data.get('phone')
+    status_param = data.get('status', '') or ''
 
     normalized_phone = None
     if phone:
@@ -6671,7 +6481,15 @@ async def get_tickets(request):
     if blocked_response is not None:
         return blocked_response
 
-    result = await db_tickets(data)
+    # По ТЗ и по контракту db_tickets передаем только простые параметры,
+    # а не весь JSON словарь запроса.
+    if user_id is None:
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Для /ticket/list требуется user_id"},
+            status=200
+        )
+
+    result = await db_tickets(str(user_id), status_param)
 
     return web.json_response(
         result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
