@@ -2321,148 +2321,156 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
 async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
     """
     Название: db_user_by_phone
-    Назначение: Получение данных пользователя по телефону из базы данных через хранимую процедуру
-    Описание: Сначала вызывает USR_Insert для регистрации/получения пользователя, 
-              затем USR_Select для получения полных данных в формате JSON
-    Принцип работы: Вызывает хранимые процедуры с параметрами и обрабатывает JSON результат
-    Входящие параметры: 
-        phone - телефон пользователя
-    Исходящие параметры: Optional[Dict[str, Any]] - данные пользователя в виде словаря или None
+    Назначение: Получение данных пользователя по телефону из базы данных через хранимые процедуры
+    Описание:
+        Сначала вызывает USR_Insert для регистрации/получения пользователя,
+        затем USR_Select для получения полных данных пользователя.
+        Поддерживает два формата ответа USR_Select:
+        1. JSON-строка в первом столбце
+        2. Обычный rowset с колонками пользователя
     """
     if not db_connection:
         raise Exception("База данных не доступна")
-    
+
     normalized_phone = normalize_phone(phone)
     if not normalized_phone:
         return None
-    
+
+    cursor = None
+
     try:
-        # Первый шаг: получение user_id через единую функцию USR_Insert
         user_id = await db_usr_insert(normalized_phone)
         if user_id is None:
             return None
-        
-        # Второй шаг: получение данных пользователя через USR_Select
+
         query = "EXECUTE [dbo].[USR_Select] @USR_Id = ?"
-        
+
+        if verbose_mode:
+            print_status("INFO", "Вызов хранимой процедуры USR_Select", f"user_id: {user_id}")
+
         cursor = db_connection.cursor()
         cursor.execute("SET LOCK_TIMEOUT 30000")
         cursor.execute(query, (user_id,))
-        
-        # Получаем результаты
+
         results = []
         try:
-            if cursor.description:  # Если есть возвращаемые колонки
+            if cursor.description:
                 columns = [column[0] for column in cursor.description]
                 for row in cursor.fetchall():
                     results.append(dict(zip(columns, row)))
         except pyodbc.ProgrammingError:
-            # Ожидаемая ошибка - нет данных для чтения
             if verbose_mode:
-                print_status("INFO", f"Процедура USR_Select не возвращает данные для чтения")
+                print_status("INFO", "Процедура USR_Select не возвращает данные для чтения")
             pass
-        
+
         db_connection.commit()
-        cursor.close()
-        
+
         if verbose_mode:
-            print_status("INFO", f"Процедура USR_Select выполнена")
-            print(f"  Получено результатов: {len(results)}")
-        
-        # Обработка результата процедуры
-        if results and len(results) > 0:
-            result_row = results[0]
-            
-            # Получаем данные из первого столбца
-            json_data = None
-            if result_row and len(result_row) > 0:
-                # Берем значение первого столбца (без имени поля)
-                first_column_value = list(result_row.values())[0]
-                
-                if verbose_mode:
-                    print_status("INFO", f"Тип полученных данных: {type(first_column_value).__name__}")
-                
-                if first_column_value is not None:
-                    # Проверяем, не вернулся ли -1 (ошибка)
-                    if isinstance(first_column_value, (int, float)):
-                        if first_column_value == -1:
-                            if verbose_mode:
-                                print_status("WARNING", f"Процедура USR_Select вернула ошибку", "ID = -1")
+            print_status("INFO", "Процедура USR_Select выполнена", f"Получено результатов: {len(results)}")
+
+        if not results:
+            return None
+
+        first_row = results[0]
+        if not first_row:
+            return None
+
+        # Вариант 1: процедура вернула одну колонку, где лежит JSON строка
+        if len(first_row) == 1:
+            first_value = list(first_row.values())[0]
+
+            if isinstance(first_value, (int, float)):
+                if int(first_value) == -1:
+                    if verbose_mode:
+                        print_status("WARNING", "USR_Select вернула ошибку", "ID = -1")
+                    return None
+
+            elif isinstance(first_value, str):
+                raw_json = first_value.strip()
+                if raw_json:
+                    parsed = json.loads(raw_json)
+
+                    if isinstance(parsed, list):
+                        if not parsed:
                             return None
-                    elif isinstance(first_column_value, str):
-                        json_data = first_column_value
-                        if verbose_mode:
-                            print_status("INFO", f"Получены JSON данные длиной {len(json_data)} символов")
-            
-            if json_data:
-                try:
-                    # Парсим JSON строку
-                    parsed_data = json.loads(json_data)
-                    
-                    if isinstance(parsed_data, list) and len(parsed_data) > 0:
-                        # Процедура возвращает список с одним элементом
-                        user_data = parsed_data[0]
-                        
-                        if verbose_mode:
-                            print_status("OK", f"Найден пользователь", 
-                                       f"ID: {user_data.get('USR_Id')}, Телефон: {user_data.get('USR_Phone')}")
-                        
-                        return user_data
+                        user_data = parsed[0]
+                    elif isinstance(parsed, dict):
+                        user_data = parsed
                     else:
-                        if verbose_mode:
-                            print_status("WARNING", f"Неверный формат JSON данных", 
-                                       f"Ожидался список, получен: {type(parsed_data).__name__}")
-                        
-                except json.JSONDecodeError as e:
-                    if verbose_mode:
-                        print_status("ERROR", f"Ошибка парсинга JSON из процедуры USR_Select", str(e))
-                        print(f"  JSON данные (первые 200 символов): {json_data[:200]}...")
-                except Exception as e:
-                    if verbose_mode:
-                        print_status("ERROR", f"Ошибка при обработке JSON данных", str(e))
-            else:
-                if verbose_mode:
-                    print_status("INFO", f"Процедура USR_Select не вернула JSON данные")
-                    print(f"  Результаты: {results}")
+                        return None
+
+                    if not isinstance(user_data, dict):
+                        return None
+
+                    user_data["id"] = str(user_data.get("id") or user_data.get("user_id") or user_id)
+                    return user_data
+
+        # Вариант 2: процедура вернула обычный набор колонок
+        user_data = dict(first_row)
+
+        if "id" not in user_data:
+            user_data["id"] = str(
+                user_data.get("USR_ID")
+                or user_data.get("user_id")
+                or user_id
+            )
         else:
-            if verbose_mode:
-                print_status("INFO", f"Процедура USR_Select не вернула результаты")
-        
-        return None
-        
+            user_data["id"] = str(user_data["id"])
+
+        if "email" not in user_data:
+            user_data["email"] = user_data.get("USR_Email")
+
+        if "surname" not in user_data:
+            user_data["surname"] = user_data.get("USR_Surname")
+
+        if "name" not in user_data:
+            user_data["name"] = user_data.get("USR_Name")
+
+        if "patronymic" not in user_data:
+            user_data["patronymic"] = user_data.get("USR_Patronymic")
+
+        return user_data
+
     except pyodbc.OperationalError as e:
         if "timeout" in str(e).lower():
-            print_status("ERROR", f"Таймаут выполнения хранимой процедуры", 
-                        f"phone: {normalized_phone}")
+            print_status("ERROR", "Таймаут выполнения USR_Select", f"phone: {normalized_phone}")
             try:
                 db_connection.rollback()
-            except:
+            except Exception:
                 pass
             raise Exception(f"Таймаут выполнения операции поиска пользователя: {str(e)}")
         else:
-            print_status("ERROR", f"Операционная ошибка при поиске пользователя {normalized_phone}", str(e))
+            print_status("ERROR", f"Операционная ошибка при поиске пользователя по телефону {normalized_phone}", str(e))
             try:
                 db_connection.rollback()
-            except:
+            except Exception:
                 pass
             raise
-            
+
     except pyodbc.Error as e:
-        print_status("ERROR", f"Ошибка базы данных при поиске пользователя {normalized_phone}", str(e))
+        print_status("ERROR", f"Ошибка базы данных при поиске пользователя по телефону {normalized_phone}", str(e))
         try:
             db_connection.rollback()
-        except:
-            pass
-        raise
-        
-    except Exception as e:
-        print_status("ERROR", f"Неожиданная ошибка при поиске пользователя {normalized_phone}", str(e))
-        try:
-            db_connection.rollback()
-        except:
+        except Exception:
             pass
         raise
 
+    except Exception as e:
+        print_status("ERROR", f"Неожиданная ошибка при поиске пользователя по телефону {normalized_phone}", str(e))
+        try:
+            db_connection.rollback()
+        except Exception:
+            pass
+        raise
+
+    finally:
+        try:
+            if cursor is not None:
+                cursor.close()
+        except Exception:
+            pass
+
+        
 async def db_user_update(user_id: int, email: str, password: str) -> bool:
     """
     Название: db_user_update
