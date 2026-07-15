@@ -7257,148 +7257,113 @@ async def get_useremailing(request: web.Request) -> web.Response:
     """
     Название: get_useremailing
     Назначение: Эндпоинт для управления согласием на email рассылку пользователя
-    Описание: Принимает user_id и consent_to_mailing, обновляет настройки рассылки в БД
-    Принцип работы: Проверяет входные данные, вызывает хранимую процедуру, возвращает результат
-    Входящие параметры: request - HTTP запрос с JSON телом содержащим user_id и consent_to_mailing
-    Исходящие параметры: web.Response - JSON ответ с кодом статуса и результатом операции
+    Описание:
+        Принимает user_id и consent_to_mailing, обновляет настройки рассылки в БД.
+        Если пользователь находится в активной локальной блокировке, запрос
+        отклоняется ДО обращения к БД по тем же правилам, что и другие user-endpoint'ы.
     """
+    endpoint = request.path
+
     try:
-        # Аутентификация по токену (с проверкой подписи клиента)
-        token = await authenticate_request(request)
-        request.authenticated_token = token
-        if verbose_mode:
-            print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
-        
-        # Парсим JSON тело запроса
         data = await request.json()
         if verbose_mode:
-            print_status("INFO", f"Получены данные для обновления согласия на рассылку", str(data))
-        
-        # УНИВЕРСАЛЬНАЯ ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПАРАМЕТРОВ
-        validation_result = validate_required_params(data, ['user_id', 'consent_to_mailing'])
-        
-        if validation_result['status'] == 'error':
-            # ВОЗВРАЩАЕМ ОТВЕТ В ЕДИНОМ СТАНДАРТЕ С КОДОМ 200
-            response = web.json_response(validation_result, status=200)
-            if verbose_mode:
-                print_status("ERROR", f"Ошибка валидации параметров", validation_result['message'])
-        else:
-            user_id = data['user_id']
-            blocked_response = await ensure_user_request_not_blocked(user_id=user_id, endpoint=request.path)
-            if blocked_response:
-                return blocked_response
-            consent_to_mailing = data['consent_to_mailing']
+            print_status("INFO", "Получены данные для обновления согласия на рассылку", str(data))
 
-            # ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЛЬЗОВАТЕЛЯ
-            user_exists = await db_userid(user_id)
-            if not user_exists:
-                raise Exception(f"Пользователь с ID {user_id} не найден")            
-            
-            if verbose_mode:
-                consent_text = "согласие получено" if consent_to_mailing else "отказ от рассылки"
-                print_status("INFO", f"Обновление согласия на рассылку", 
-                            f"user_id: {user_id}, статус: {consent_text}")
-            
-            # Проверяем тип consent_to_mailing
-            if not isinstance(consent_to_mailing, bool):
-                response_data = {
+        validation_result = validate_required_params(data, ['user_id', 'consent_to_mailing'])
+        if validation_result['status'] == 'error':
+            return web.json_response(validation_result, status=200)
+
+        raw_user_id = data['user_id']
+        consent_to_mailing = data['consent_to_mailing']
+
+        if not isinstance(consent_to_mailing, bool):
+            return web.json_response(
+                {
                     "status": "error",
                     "message": "Параметр consent_to_mailing должен быть boolean (true/false)"
-                }
-                response = web.json_response(response_data, status=200)
-                if verbose_mode:
-                    print_status("ERROR", f"Неверный тип consent_to_mailing", type(consent_to_mailing).__name__)
-            else:
-                # Преобразуем user_id в число
-                try:
-                    user_id_int = int(user_id)
-                except (ValueError, TypeError):
-                    response_data = {
-                        "status": "error",
-                        "message": "Параметр user_id должен быть числом"
-                    }
-                    response = web.json_response(response_data, status=200)
-                    if verbose_mode:
-                        print_status("ERROR", f"Неверный формат user_id", user_id)
-                else:
-                    # Обновляем согласие на рассылку в базе данных
-                    update_success = await db_useremailing(user_id_int, consent_to_mailing)
-                    
-                    if update_success:
-                        response_data = {
-                            "status": "success"
-                        }
-                        response = web.json_response(response_data, status=200)
-                        if verbose_mode:
-                            print_status("OK", f"Согласие на рассылку для пользователя {user_id} успешно обновлено")
-                    else:
-                        response_data = {
-                            "status": "error", 
-                            "message": "Ошибка обновления согласия на рассылку. Пользователь не найден или ошибка в БД."
-                        }
-                        response = web.json_response(response_data, status=200)
-                        if verbose_mode:
-                            print_status("ERROR", f"Ошибка обновления согласия на рассылку для пользователя {user_id}")
-        
-        # ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
-        await add_server_signature_to_response(response, token)
+                },
+                status=200
+            )
+
+        try:
+            user_id_int = int(raw_user_id)
+        except (ValueError, TypeError):
+            return web.json_response(
+                {
+                    "status": "error",
+                    "message": "Параметр user_id должен быть числом"
+                },
+                status=200
+            )
+
+        blocked_response = await ensure_user_request_not_blocked(
+            user_id=user_id_int,
+            endpoint=endpoint
+        )
+        if blocked_response is not None:
+            return blocked_response
+
+        user_exists = await db_userid(user_id_int)
+        if not user_exists:
+            return web.json_response(
+                {
+                    "status": "error",
+                    "message": f"Пользователь с ID {user_id_int} не найден"
+                },
+                status=200
+            )
+
         if verbose_mode:
-            print_status("OK", f"Добавлена серверная подпись к ответу")
-        
-        return response
-        
-    except web.HTTPException as he:
-        # Перехватываем HTTP исключения (403, 404 и т.д.) и добавляем подпись
-        response_data = {
-            "status": "error",
-            "message": he.text
-        }
-        response = web.json_response(response_data, status=he.status)
-        if verbose_mode:
-            print_status("ERROR", f"HTTP исключение в get_useremailing",
-                        data_lines=[
-                            f"Статус: {he.status}",
-                            f"Текст: {he.text}"
-                        ])
-        await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
-        return response
+            consent_text = "согласие получено" if consent_to_mailing else "отказ от рассылки"
+            print_status(
+                "INFO",
+                "Обновление согласия на рассылку",
+                f"user_id: {user_id_int}, статус: {consent_text}"
+            )
+
+        update_success = await db_useremailing(user_id_int, consent_to_mailing)
+
+        if update_success:
+            return web.json_response(
+                {
+                    "status": "success"
+                },
+                status=200
+            )
+
+        return web.json_response(
+            {
+                "status": "error",
+                "message": "Ошибка обновления согласия на рассылку. Пользователь не найден или ошибка в БД."
+            },
+            status=200
+        )
+
     except json.JSONDecodeError as e:
         if verbose_mode:
-            print_status("ERROR", f"Ошибка декодирования JSON", str(e))
-        response_data = {
-            "status": "error",
-            "message": "Невалидный JSON в теле запроса"
-        }
-        response = web.json_response(response_data, status=200)
-        
-        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
-        auth_header = request.headers.get("Token", "")
-        token_for_signature = "json_error"
-        if auth_header.startswith("Bearer "):
-            token_for_signature = auth_header[7:]
-        await add_server_signature_to_response(response, token_for_signature)
-        
-        return response
+            print_status("ERROR", "Ошибка декодирования JSON", str(e))
+        return web.json_response(
+            {
+                "status": "error",
+                "message": "Невалидный JSON в теле запроса"
+            },
+            status=200
+        )
+
     except Exception as e:
         if verbose_mode:
-            print_status("ERROR", f"Неожиданная ошибка в get_useremailing", str(e))
+            print_status("ERROR", "Неожиданная ошибка в get_useremailing", str(e))
             import traceback
             traceback.print_exc()
-        response_data = {
-            "status": "error",
-            "message": f"Ошибка при обновлении согласия на рассылку: {str(e)}"
-        }
-        response = web.json_response(response_data, status=200)
+
+        return web.json_response(
+            {
+                "status": "error",
+                "message": f"Ошибка при обновлении согласия на рассылку: {str(e)}"
+            },
+            status=200
+        )
         
-        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
-        auth_header = request.headers.get("Token", "")
-        token_for_signature = "unexpected_error"
-        if auth_header.startswith("Bearer "):
-            token_for_signature = auth_header[7:]
-        await add_server_signature_to_response(response, token_for_signature)
-        
-        return response
-    
 # --- ОБРАБОТЧИК ЭНДПОИНТА ДЛЯ РАСЧЕТА РАСПРЕДЕЛЕНИЯ ПЛАТЕЖА ---
 
 async def get_payment_calculate_distribution(request: web.Request) -> web.Response:
