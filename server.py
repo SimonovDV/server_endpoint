@@ -4538,7 +4538,7 @@ async def cache_user_block(user_id=None, phone=None, normalized_phone=None,
     - поддерживает новые вызовы с phone=
     - фактически использует один источник телефона для вычисления user_id
     """
-    global blocked_users, blocked_user_lock, max_blocked_users_cache_size
+    global blocked_users, blocked_user_lock, config
 
     if blocked_user_lock is None:
         blocked_user_lock = asyncio.Lock()
@@ -4625,8 +4625,15 @@ async def cache_user_block(user_id=None, phone=None, normalized_phone=None,
         "updated_at": now
     }
 
+    max_cache_size = 500
+    try:
+        if config is not None and hasattr(config, "max_blocked_users_cache_size"):
+            max_cache_size = int(config.max_blocked_users_cache_size or 500)
+    except Exception:
+        max_cache_size = 500
+
     async with blocked_user_lock:
-        if max_blocked_users_cache_size and len(blocked_users) >= max_blocked_users_cache_size:
+        if max_cache_size and len(blocked_users) >= max_cache_size:
             removable_key = None
             oldest_updated_at = None
 
@@ -4689,7 +4696,6 @@ async def cache_user_block(user_id=None, phone=None, normalized_phone=None,
         )
 
     return item
-
 
 async def remove_user_block(user_id=None, phone=None):
     """
