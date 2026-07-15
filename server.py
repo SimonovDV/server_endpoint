@@ -4652,8 +4652,9 @@ async def cache_user_block(user_id=None, phone=None, normalized_phone=None,
 
         blocked_users[primary_key] = item
 
-    emit_security_event(
-        "memory_block_set",
+    log_security_event(
+        event_type="memory_block_set",
+        level="WARNING",
         user_id=resolved_user_id,
         normalized_phone=normalized_phone_value,
         endpoint=None,
