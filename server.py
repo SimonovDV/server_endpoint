@@ -7253,20 +7253,10 @@ async def get_documentlist(request):
 
 
 async def get_useremailing(request: web.Request) -> web.Response:
-    """
-    Название: get_useremailing
-    Назначение: Эндпоинт для управления согласием на email рассылку пользователя
-    Описание:
-        Принимает user_id и consent_to_mailing, обновляет настройки рассылки в БД.
-        Если пользователь находится в активной локальной блокировке, запрос
-        отклоняется ДО обращения к БД по тем же правилам, что и другие user-endpoint'ы.
-    """
     endpoint = request.path
 
     try:
         data = await request.json()
-        if verbose_mode:
-            print_status("INFO", "Получены данные для обновления согласия на рассылку", str(data))
 
         validation_result = validate_required_params(data, ['user_id', 'consent_to_mailing'])
         if validation_result['status'] == 'error':
@@ -7312,23 +7302,10 @@ async def get_useremailing(request: web.Request) -> web.Response:
                 status=200
             )
 
-        if verbose_mode:
-            consent_text = "согласие получено" if consent_to_mailing else "отказ от рассылки"
-            print_status(
-                "INFO",
-                "Обновление согласия на рассылку",
-                f"user_id: {user_id_int}, статус: {consent_text}"
-            )
-
         update_success = await db_useremailing(user_id_int, consent_to_mailing)
 
         if update_success:
-            return web.json_response(
-                {
-                    "status": "success"
-                },
-                status=200
-            )
+            return web.json_response({"status": "success"}, status=200)
 
         return web.json_response(
             {
@@ -7338,9 +7315,7 @@ async def get_useremailing(request: web.Request) -> web.Response:
             status=200
         )
 
-    except json.JSONDecodeError as e:
-        if verbose_mode:
-            print_status("ERROR", "Ошибка декодирования JSON", str(e))
+    except json.JSONDecodeError:
         return web.json_response(
             {
                 "status": "error",
@@ -7350,11 +7325,6 @@ async def get_useremailing(request: web.Request) -> web.Response:
         )
 
     except Exception as e:
-        if verbose_mode:
-            print_status("ERROR", "Неожиданная ошибка в get_useremailing", str(e))
-            import traceback
-            traceback.print_exc()
-
         return web.json_response(
             {
                 "status": "error",
@@ -7362,7 +7332,7 @@ async def get_useremailing(request: web.Request) -> web.Response:
             },
             status=200
         )
-            
+                
 # --- ОБРАБОТЧИК ЭНДПОИНТА ДЛЯ РАСЧЕТА РАСПРЕДЕЛЕНИЯ ПЛАТЕЖА ---
 
 async def get_payment_calculate_distribution(request: web.Request) -> web.Response:
