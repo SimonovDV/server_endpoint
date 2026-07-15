@@ -69,6 +69,7 @@ from datetime import datetime, timedelta
 from collections import deque
 
 
+
 # --- Глобальные переменные и конфигурация ---
 # Глобальный словарь для хранения запросов
 request_store = {}
@@ -1920,6 +1921,20 @@ async def extract_request_user_identity(request: web.Request) -> dict:
     except Exception:
         return result
     
+def build_block_primary_key(user_id=None, phone=None):
+    """
+    Канонический ключ блокировки.
+    Приоритет всегда у user_id, телефон используется только как fallback.
+    """
+    if user_id is not None and str(user_id).strip() != "":
+        return f"uid:{int(user_id)}"
+
+    if phone:
+        normalized_phone = normalize_phone(phone) if not str(phone).isdigit() or len(str(phone)) != 10 else str(phone)
+        return f"phone:{normalized_phone}"
+
+    return None
+
 # --- РАБОТА С БАЗОЙ ДАННЫХ MSSQL ---
 
 async def init_database():
@@ -4427,35 +4442,29 @@ def build_failed_login_event(user_id=None, normalized_phone=None, source='db_res
 
 async def register_failed_login_attempt(phone=None, user_id=None, source='db_result'):
     """
-    Название: register_failed_login_attempt
-    Назначение: Диагностическая регистрация неуспешной попытки авторизации
-    Описание:
-        Журнал неуспешных попыток ограничивается параметром Config.max_failed_login_events.
+    Запись неуспешной попытки авторизации в FIFO-очередь фиксированного размера.
     """
     global failed_login_attempts, failed_login_attempts_lock
 
     if failed_login_attempts_lock is None:
         failed_login_attempts_lock = asyncio.Lock()
 
-    if failed_login_attempts is None:
+    if failed_login_attempts is None or not isinstance(failed_login_attempts, deque):
         failed_login_attempts = deque(maxlen=config.max_failed_login_events)
 
-    event = build_failed_login_event(
-        user_id=user_id,
-        normalized_phone=phone,
-        source=source
-    )
+    event = {
+        "timestamp": datetime.now(),
+        "user_id": user_id,
+        "normalized_phone": phone,
+        "source": source or "db_result"
+    }
 
     async with failed_login_attempts_lock:
-        if failed_login_attempts.maxlen != config.max_failed_login_events:
-            failed_login_attempts = deque(failed_login_attempts, maxlen=config.max_failed_login_events)
+        if not isinstance(failed_login_attempts, deque) or failed_login_attempts.maxlen != config.max_failed_login_events:
+            failed_login_attempts = deque(failed_login_attempts or [], maxlen=config.max_failed_login_events)
+
         failed_login_attempts.append(event)
 
-    if verbose_mode:
-        marker = user_id if user_id is not None else phone
-        print_status("INFO", "Зарегистрирована неуспешная попытка авторизации", f"{marker}")
-
-    return event
 
 async def set_user_block(*args, **kwargs):
     """
@@ -4476,146 +4485,119 @@ async def cache_user_block(
     message=None
 ):
     """
-    Название: cache_user_block
-    Назначение: Кэширование блокировки, полученной от БД
-    Описание:
-        Использует Config.max_blocked_users_cache_size для ограничения роста кэша блокировок
-        и гарантированно логирует:
-        - получение блокировки от БД;
-        - установку блокировки в памяти.
+    Кэширование блокировки в едином формате.
+    Каноническая запись хранится по uid:<id>, если user_id известен.
+    Если user_id неизвестен, временно храним по phone:<normalized_phone>.
+    При наличии обоих идентификаторов телефонный ключ выступает alias на ту же запись.
     """
     global blocked_users, blocked_user_lock
 
     if blocked_user_lock is None:
         blocked_user_lock = asyncio.Lock()
 
-    if blocked_users is None:
+    if blocked_users is None or not isinstance(blocked_users, dict):
         blocked_users = {}
 
     now = datetime.now()
     blocked_from = blocked_from or now
     blocked_until = blocked_until or now
 
-    log_security_event(
-        event_type="db_block_received",
-        level="WARNING",
-        user_id=user_id,
-        normalized_phone=normalized_phone,
-        reason=reason,
-        result="received",
-        details={
-            "blocked_from": blocked_from.isoformat() if isinstance(blocked_from, datetime) else str(blocked_from),
-            "blocked_until": blocked_until.isoformat() if isinstance(blocked_until, datetime) else str(blocked_until),
-            "db_current_timestamp": db_current_timestamp.isoformat() if isinstance(db_current_timestamp, datetime) else str(db_current_timestamp),
-            "clock_skew_seconds": clock_skew_seconds,
-            "message": message
-        }
-    )
+    primary_key = build_block_primary_key(user_id=user_id, phone=normalized_phone)
+    if primary_key is None:
+        return
 
-    records_to_store = {}
+    record = {
+        "cache_key": primary_key,
+        "user_id": int(user_id) if user_id is not None and str(user_id).strip() != "" else None,
+        "normalized_phone": normalized_phone,
+        "blocked_from": blocked_from,
+        "blocked_until": blocked_until,
+        "reason": reason,
+        "message": message,
+        "db_current_timestamp": db_current_timestamp,
+        "clock_skew_seconds": clock_skew_seconds,
+        "updated_at": now
+    }
 
-    if user_id is not None:
-        uid_key = f"uid:{user_id}"
-        records_to_store[uid_key] = build_block_record(
-            cache_key=uid_key,
-            user_id=user_id,
-            normalized_phone=normalized_phone,
-            blocked_from=blocked_from,
-            blocked_until=blocked_until,
-            reason=reason,
-            message=message,
-            db_current_timestamp=db_current_timestamp,
-            clock_skew_seconds=clock_skew_seconds
-        )
-
-    if normalized_phone:
-        phone_key = f"phone:{normalized_phone}"
-        records_to_store[phone_key] = build_block_record(
-            cache_key=phone_key,
-            user_id=user_id,
-            normalized_phone=normalized_phone,
-            blocked_from=blocked_from,
-            blocked_until=blocked_until,
-            reason=reason,
-            message=message,
-            db_current_timestamp=db_current_timestamp,
-            clock_skew_seconds=clock_skew_seconds
-        )
+    phone_alias_key = f"phone:{normalized_phone}" if normalized_phone else None
 
     async with blocked_user_lock:
-        for key, record in records_to_store.items():
-            blocked_users[key] = record
+        blocked_users[primary_key] = record
 
-        expired_keys = [
-            key for key, item in blocked_users.items()
-            if not isinstance(item, dict) or not item.get("blocked_until") or item["blocked_until"] <= now
-        ]
-        for key in expired_keys:
-            blocked_users.pop(key, None)
-
-        if config.max_blocked_users_cache_size > 0 and len(blocked_users) > config.max_blocked_users_cache_size:
-            sortable_items = sorted(
-                blocked_users.items(),
-                key=lambda kv: (
-                    kv[1].get("updated_at") or datetime.min,
-                    kv[1].get("blocked_from") or datetime.min,
-                    kv[0]
-                )
-            )
-
-            while len(blocked_users) > config.max_blocked_users_cache_size and sortable_items:
-                old_key, _ = sortable_items.pop(0)
-                blocked_users.pop(old_key, None)
+        if phone_alias_key and phone_alias_key != primary_key:
+            blocked_users[phone_alias_key] = {
+                "__alias__": primary_key,
+                "updated_at": now
+            }
 
     log_security_event(
         event_type="memory_block_set",
         level="WARNING",
-        user_id=user_id,
+        user_id=record.get("user_id"),
         normalized_phone=normalized_phone,
         reason=reason,
         result="stored",
         details={
-            "keys": list(records_to_store.keys()),
+            "primary_key": primary_key,
+            "phone_alias_key": phone_alias_key,
             "blocked_until": blocked_until.isoformat() if isinstance(blocked_until, datetime) else str(blocked_until)
         }
     )
 
+
 async def remove_user_block(user_id=None, phone=None):
     """
-    Название: remove_user_block
-    Назначение: Удаление записи о блокировке из локального кэша ПБД
-    Описание:
-        Удаляет все связанные записи блокировки по ключам uid:<id> и phone:<normalized_phone>
-        и гарантированно логирует снятие блокировки.
+    Снятие блокировки по всем связанным ключам: uid, phone и alias.
     """
     global blocked_users, blocked_user_lock
 
     if blocked_user_lock is None:
         blocked_user_lock = asyncio.Lock()
 
+    if blocked_users is None or not isinstance(blocked_users, dict):
+        blocked_users = {}
+
     removed = False
     removed_keys = []
-    keys = []
 
-    if user_id is not None:
-        keys.append(f"uid:{user_id}")
-    if phone:
-        keys.append(f"phone:{phone}")
+    uid_key = f"uid:{int(user_id)}" if user_id is not None and str(user_id).strip() != "" else None
+    phone_key = f"phone:{phone}" if phone else None
 
     async with blocked_user_lock:
-        for key in keys:
+        candidate_keys = [k for k in [uid_key, phone_key] if k]
+
+        for key in list(dict.fromkeys(candidate_keys)):
+            item = blocked_users.get(key)
+
+            if isinstance(item, dict) and "__alias__" in item:
+                alias_target = item.get("__alias__")
+                blocked_users.pop(key, None)
+                removed_keys.append(key)
+                removed = True
+
+                if alias_target and alias_target in blocked_users:
+                    blocked_users.pop(alias_target, None)
+                    removed_keys.append(alias_target)
+                continue
+
             if key in blocked_users:
                 blocked_users.pop(key, None)
                 removed_keys.append(key)
                 removed = True
 
-        if user_id is not None and phone:
+        if user_id is not None or phone:
             for key, item in list(blocked_users.items()):
                 if not isinstance(item, dict):
                     continue
 
-                same_user = item.get("user_id") == user_id
-                same_phone = item.get("normalized_phone") == phone
+                if item.get("__alias__") in [uid_key, phone_key]:
+                    blocked_users.pop(key, None)
+                    removed_keys.append(key)
+                    removed = True
+                    continue
+
+                same_user = user_id is not None and item.get("user_id") == int(user_id)
+                same_phone = bool(phone) and item.get("normalized_phone") == phone
 
                 if same_user or same_phone:
                     blocked_users.pop(key, None)
@@ -4782,73 +4764,74 @@ async def get_user_login(request):
 
 async def clear_failed_login_attempts(phone=None, user_id=None):
     """
-    Название: clear_failed_login_attempts
-    Назначение: Очистка журнала неуспешных попыток авторизации по пользователю
-    Описание:
-        Удаляет все записи, относящиеся к пользователю, как по normalized_phone,
-        так и по user_id, что соответствует ТЗ для очистки после успешной авторизации
-        и после успешной смены пароля.
+    Очистка неуспешных попыток по user_id и/или телефону.
     """
     global failed_login_attempts, failed_login_attempts_lock
 
     if failed_login_attempts_lock is None:
         failed_login_attempts_lock = asyncio.Lock()
 
+    if failed_login_attempts is None or not isinstance(failed_login_attempts, deque):
+        failed_login_attempts = deque(maxlen=config.max_failed_login_events)
+
     async with failed_login_attempts_lock:
-        if failed_login_attempts is None:
-            failed_login_attempts = []
-            return
-
-        filtered = []
-        for item in failed_login_attempts:
-            same_phone = bool(phone) and item.get('normalized_phone') == phone
-            same_user = user_id is not None and item.get('user_id') == user_id
-
-            if same_phone or same_user:
-                continue
-
-            filtered.append(item)
+        filtered = deque(
+            (
+                item for item in failed_login_attempts
+                if not (
+                    (bool(phone) and item.get("normalized_phone") == phone) or
+                    (user_id is not None and item.get("user_id") == user_id)
+                )
+            ),
+            maxlen=config.max_failed_login_events
+        )
 
         failed_login_attempts = filtered
 
     if verbose_mode:
         print_status("INFO", "Очищены записи о неуспешных попытках", f"user_id={user_id}, phone={phone}")
 
-
 async def get_active_user_block(user_id=None, phone=None):
     """
-    Название: get_active_user_block
-    Назначение: Получение активной блокировки из локального кэша ПБД
-    Описание:
-        Возвращает полную запись блокировки в стандартизированном формате ТЗ,
-        содержащую как минимум:
-        cache_key, user_id, normalized_phone, blocked_from, blocked_until, reason.
+    Получение активной блокировки по каноническому ключу или alias.
     """
     global blocked_users, blocked_user_lock
 
     if blocked_user_lock is None:
         blocked_user_lock = asyncio.Lock()
 
+    if blocked_users is None or not isinstance(blocked_users, dict):
+        blocked_users = {}
+
     now = datetime.now()
     lookup_keys = []
 
+    primary_key = build_block_primary_key(user_id=user_id, phone=phone)
+    if primary_key:
+        lookup_keys.append(primary_key)
+
     if user_id is not None:
-        lookup_keys.append(f"uid:{user_id}")
+        lookup_keys.append(f"uid:{int(user_id)}")
     if phone:
         lookup_keys.append(f"phone:{phone}")
 
     async with blocked_user_lock:
-        for key in lookup_keys:
+        for key in dict.fromkeys(lookup_keys):
             item = blocked_users.get(key)
             if not item:
+                continue
+
+            if isinstance(item, dict) and "__alias__" in item:
+                item = blocked_users.get(item["__alias__"])
+
+            if not isinstance(item, dict):
                 continue
 
             blocked_until = item.get("blocked_until")
             if isinstance(blocked_until, datetime) and blocked_until > now:
                 item["updated_at"] = now
-
-                normalized_item = {
-                    "cache_key": item.get("cache_key") or key,
+                return {
+                    "cache_key": item.get("cache_key"),
                     "user_id": item.get("user_id"),
                     "normalized_phone": item.get("normalized_phone"),
                     "blocked_from": item.get("blocked_from"),
@@ -4859,7 +4842,6 @@ async def get_active_user_block(user_id=None, phone=None):
                     "clock_skew_seconds": item.get("clock_skew_seconds"),
                     "updated_at": item.get("updated_at")
                 }
-                return normalized_item
 
             blocked_users.pop(key, None)
 
@@ -4878,6 +4860,13 @@ async def cleanup_expired_user_blocking_state(force=False):
         - failed_login_event_retention_seconds
         - user_operation_lock_ttl_seconds
         - max_user_operation_locks
+
+        Дополнительно:
+        - гарантирует корректный тип failed_login_attempts (deque),
+          даже если ранее структура была ошибочно заменена на list;
+        - корректно обрабатывает alias-записи блокировок, если они используются
+          в механизме единообразного ключа блокировки;
+        - очищает "битые" записи in-memory кэшей без падения фоновой задачи.
     """
     global blocked_users, blocked_user_lock
     global failed_login_attempts, failed_login_attempts_lock
@@ -4887,15 +4876,23 @@ async def cleanup_expired_user_blocking_state(force=False):
 
     if blocked_user_lock is None:
         blocked_user_lock = asyncio.Lock()
+
     if failed_login_attempts_lock is None:
         failed_login_attempts_lock = asyncio.Lock()
+
     if user_operation_locks_guard is None:
         user_operation_locks_guard = asyncio.Lock()
-    if blocked_users is None:
+
+    if blocked_users is None or not isinstance(blocked_users, dict):
         blocked_users = {}
-    if failed_login_attempts is None:
-        failed_login_attempts = deque(maxlen=config.max_failed_login_events)
-    if user_operation_locks is None:
+
+    if failed_login_attempts is None or not isinstance(failed_login_attempts, deque):
+        failed_login_attempts = deque(
+            failed_login_attempts if isinstance(failed_login_attempts, (list, tuple, deque)) else [],
+            maxlen=config.max_failed_login_events
+        )
+
+    if user_operation_locks is None or not isinstance(user_operation_locks, dict):
         user_operation_locks = {}
 
     removed_blocks = 0
@@ -4904,36 +4901,70 @@ async def cleanup_expired_user_blocking_state(force=False):
 
     async with blocked_user_lock:
         expired_keys = []
-        for key, item in blocked_users.items():
-            blocked_until = item.get("blocked_until") if isinstance(item, dict) else None
-            if not blocked_until or blocked_until <= now:
+
+        for key, item in list(blocked_users.items()):
+            if not isinstance(item, dict):
+                expired_keys.append(key)
+                continue
+
+            # alias-запись вида {"__alias__": "uid:83", "updated_at": ...}
+            if "__alias__" in item:
+                alias_target = item.get("__alias__")
+                target_item = blocked_users.get(alias_target)
+
+                if not isinstance(target_item, dict):
+                    expired_keys.append(key)
+                    continue
+
+                target_blocked_until = target_item.get("blocked_until")
+                if not isinstance(target_blocked_until, datetime) or target_blocked_until <= now:
+                    expired_keys.append(key)
+
+                continue
+
+            blocked_until = item.get("blocked_until")
+            if not isinstance(blocked_until, datetime) or blocked_until <= now:
                 expired_keys.append(key)
 
         for key in expired_keys:
-            blocked_users.pop(key, None)
-            removed_blocks += 1
+            if key in blocked_users:
+                blocked_users.pop(key, None)
+                removed_blocks += 1
 
         if config.max_blocked_users_cache_size > 0 and len(blocked_users) > config.max_blocked_users_cache_size:
             sortable_items = sorted(
                 blocked_users.items(),
                 key=lambda kv: (
-                    kv[1].get("updated_at") or datetime.min,
-                    kv[1].get("blocked_from") or datetime.min,
+                    (
+                        blocked_users.get(kv[1].get("__alias__"), {}).get("updated_at")
+                        if isinstance(kv[1], dict) and "__alias__" in kv[1]
+                        else kv[1].get("updated_at")
+                    ) or datetime.min,
+                    (
+                        blocked_users.get(kv[1].get("__alias__"), {}).get("blocked_from")
+                        if isinstance(kv[1], dict) and "__alias__" in kv[1]
+                        else kv[1].get("blocked_from")
+                    ) or datetime.min,
                     kv[0]
                 )
             )
+
             while len(blocked_users) > config.max_blocked_users_cache_size and sortable_items:
                 old_key, _ = sortable_items.pop(0)
-                blocked_users.pop(old_key, None)
-                removed_blocks += 1
+                if old_key in blocked_users:
+                    blocked_users.pop(old_key, None)
+                    removed_blocks += 1
 
     cutoff = now - timedelta(seconds=config.failed_login_event_retention_seconds)
 
     async with failed_login_attempts_lock:
-        original_count = len(failed_login_attempts)
+        if not isinstance(failed_login_attempts, deque) or failed_login_attempts.maxlen != config.max_failed_login_events:
+            failed_login_attempts = deque(
+                list(failed_login_attempts) if isinstance(failed_login_attempts, (list, tuple, deque)) else [],
+                maxlen=config.max_failed_login_events
+            )
 
-        if failed_login_attempts.maxlen != config.max_failed_login_events:
-            failed_login_attempts = deque(failed_login_attempts, maxlen=config.max_failed_login_events)
+        original_count = len(failed_login_attempts)
 
         filtered_events = deque(
             (
@@ -4946,6 +4977,7 @@ async def cleanup_expired_user_blocking_state(force=False):
                 for item in failed_login_attempts
                 if isinstance(item, dict)
                 and item.get("timestamp")
+                and isinstance(item.get("timestamp"), datetime)
                 and item["timestamp"] >= cutoff
             ),
             maxlen=config.max_failed_login_events
@@ -4954,32 +4986,53 @@ async def cleanup_expired_user_blocking_state(force=False):
         failed_login_attempts = filtered_events
         removed_failed_events = original_count - len(failed_login_attempts)
 
-    lock_cutoff = now - timedelta(seconds=max(config.user_operation_lock_ttl_seconds, 60))
+    lock_ttl_seconds = int(getattr(config, 'user_operation_lock_ttl_seconds', 1800) or 1800)
+    max_user_operation_locks = int(getattr(config, 'max_user_operation_locks', 10000) or 10000)
+    lock_cutoff = now - timedelta(seconds=max(lock_ttl_seconds, 60))
 
     async with user_operation_locks_guard:
         removable_keys = []
-        for key, entry in user_operation_locks.items():
+
+        for key, entry in list(user_operation_locks.items()):
+            if not isinstance(entry, dict):
+                removable_keys.append(key)
+                continue
+
             lock = entry.get("lock")
             last_used_at = entry.get("last_used_at") or entry.get("created_at") or now
 
-            if last_used_at < lock_cutoff and lock is not None and not lock.locked():
+            if (
+                isinstance(last_used_at, datetime)
+                and last_used_at < lock_cutoff
+                and lock is not None
+                and not lock.locked()
+            ):
                 removable_keys.append(key)
 
         for key in removable_keys:
-            user_operation_locks.pop(key, None)
-            removed_user_locks += 1
+            if key in user_operation_locks:
+                user_operation_locks.pop(key, None)
+                removed_user_locks += 1
 
-        if config.max_user_operation_locks > 0 and len(user_operation_locks) > config.max_user_operation_locks:
+        if max_user_operation_locks > 0 and len(user_operation_locks) > max_user_operation_locks:
             sortable_locks = sorted(
                 user_operation_locks.items(),
                 key=lambda kv: (
-                    kv[1].get("last_used_at") or kv[1].get("created_at") or now,
+                    kv[1].get("last_used_at") if isinstance(kv[1], dict) else datetime.min,
+                    kv[1].get("created_at") if isinstance(kv[1], dict) else datetime.min,
                     kv[0]
                 )
             )
 
-            while len(user_operation_locks) > config.max_user_operation_locks and sortable_locks:
+            while len(user_operation_locks) > max_user_operation_locks and sortable_locks:
                 old_key, old_entry = sortable_locks.pop(0)
+
+                if not isinstance(old_entry, dict):
+                    if old_key in user_operation_locks:
+                        user_operation_locks.pop(old_key, None)
+                        removed_user_locks += 1
+                    continue
+
                 old_lock = old_entry.get("lock")
 
                 if old_lock is not None and old_lock.locked():
@@ -4995,7 +5048,6 @@ async def cleanup_expired_user_blocking_state(force=False):
             "Очистка in-memory состояния блокировок завершена",
             f"removed_blocks={removed_blocks}, removed_failed_events={removed_failed_events}, removed_user_locks={removed_user_locks}"
         )
-
         
 async def ensure_user_request_not_blocked(user_id=None, phone=None, endpoint=None):
     """
