@@ -4591,7 +4591,8 @@ async def cache_user_block(
 
 async def remove_user_block(user_id=None, phone=None):
     """
-    Снятие блокировки по всем связанным ключам: uid, phone и alias.
+    Снятие блокировки конкретного пользователя по точным связанным ключам: uid и/или phone alias.
+    Массовое удаление записей других пользователей не допускается.
     """
     global blocked_users, blocked_user_lock
 
@@ -4610,7 +4611,7 @@ async def remove_user_block(user_id=None, phone=None):
     if verbose_mode:
         print_status(
             "INFO",
-            "remove_user_block: попытка снять блокировку",
+            "remove_user_block: попытка снять блокировку конкретного пользователя",
             data_lines=[
                 f"user_id={user_id!r}",
                 f"phone={phone!r}",
@@ -4620,45 +4621,49 @@ async def remove_user_block(user_id=None, phone=None):
         )
 
     async with blocked_user_lock:
-        candidate_keys = [k for k in [uid_key, phone_key] if k]
+        keys_to_remove = set()
 
-        for key in list(dict.fromkeys(candidate_keys)):
-            item = blocked_users.get(key)
+        if uid_key:
+            item = blocked_users.get(uid_key)
+            if item is not None:
+                keys_to_remove.add(uid_key)
 
-            if isinstance(item, dict) and "__alias__" in item:
-                alias_target = item.get("__alias__")
-                blocked_users.pop(key, None)
-                removed_keys.append(key)
-                removed = True
+                if isinstance(item, dict):
+                    item_phone = item.get("normalized_phone")
+                    if item_phone:
+                        keys_to_remove.add(f"phone:{item_phone}")
 
-                if alias_target and alias_target in blocked_users:
-                    blocked_users.pop(alias_target, None)
-                    removed_keys.append(alias_target)
-                continue
+        if phone_key:
+            item = blocked_users.get(phone_key)
+            if item is not None:
+                keys_to_remove.add(phone_key)
 
+                if isinstance(item, dict) and "__alias__" in item:
+                    alias_target = item.get("__alias__")
+                    if alias_target:
+                        keys_to_remove.add(alias_target)
+                        target_item = blocked_users.get(alias_target)
+                        if isinstance(target_item, dict):
+                            target_phone = target_item.get("normalized_phone")
+                            if target_phone:
+                                keys_to_remove.add(f"phone:{target_phone}")
+                elif isinstance(item, dict):
+                    item_user_id = item.get("user_id")
+                    if item_user_id is not None:
+                        keys_to_remove.add(f"uid:{int(item_user_id)}")
+
+        if uid_key and uid_key in blocked_users:
+            item = blocked_users.get(uid_key)
+            if isinstance(item, dict):
+                item_phone = item.get("normalized_phone")
+                if item_phone:
+                    keys_to_remove.add(f"phone:{item_phone}")
+
+        for key in list(keys_to_remove):
             if key in blocked_users:
                 blocked_users.pop(key, None)
                 removed_keys.append(key)
                 removed = True
-
-        if user_id is not None or phone:
-            for key, item in list(blocked_users.items()):
-                if not isinstance(item, dict):
-                    continue
-
-                if item.get("__alias__") in [uid_key, phone_key]:
-                    blocked_users.pop(key, None)
-                    removed_keys.append(key)
-                    removed = True
-                    continue
-
-                same_user = user_id is not None and item.get("user_id") == int(user_id)
-                same_phone = bool(phone) and item.get("normalized_phone") == phone
-
-                if same_user or same_phone:
-                    blocked_users.pop(key, None)
-                    removed_keys.append(key)
-                    removed = True
 
     if removed:
         log_security_event(
@@ -4667,7 +4672,7 @@ async def remove_user_block(user_id=None, phone=None):
             user_id=user_id,
             normalized_phone=phone,
             result="removed",
-            details={"removed_keys": removed_keys}
+            details={"removed_keys": sorted(removed_keys)}
         )
 
     if verbose_mode:
@@ -4680,7 +4685,7 @@ async def remove_user_block(user_id=None, phone=None):
             "remove_user_block: результат снятия блокировки",
             data_lines=[
                 f"removed={removed}",
-                f"removed_keys={removed_keys!r}",
+                f"removed_keys={sorted(removed_keys)!r}",
                 "Снимок blocked_users после удаления:"
             ] + snapshot_lines
         )
