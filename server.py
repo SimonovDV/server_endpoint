@@ -6560,10 +6560,12 @@ async def get_user_update(request):
             status=200
         )
 
-    user_id = data.get('id') or data.get('user_id')
-    normalized_phone = None
-
+    raw_user_id = data.get('id') or data.get('user_id')
+    email = data.get('email')
+    raw_password = data.get('password')
     phone = data.get('phone')
+
+    normalized_phone = None
     if isinstance(phone, str) and phone.strip():
         try:
             normalized_phone = normalize_phone(phone)
@@ -6575,13 +6577,25 @@ async def get_user_update(request):
                 status=200
             )
 
-    if not user_id and not normalized_phone:
+    if raw_user_id in (None, "") and not normalized_phone:
         return web.json_response(
             {"status": "error", "code": 400, "message": "Не указан идентификатор пользователя"},
             status=200
         )
 
-    raw_password = data.get('password')
+    try:
+        user_id = int(raw_user_id) if raw_user_id not in (None, "") else None
+    except (TypeError, ValueError):
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Некорректный идентификатор пользователя"},
+            status=200
+        )
+
+    if email is None:
+        email = ""
+    if not isinstance(email, str):
+        email = str(email)
+
     password_present = isinstance(raw_password, str) and raw_password.strip() != ""
 
     active_block = await get_active_user_block(user_id=user_id, phone=normalized_phone)
@@ -6606,18 +6620,33 @@ async def get_user_update(request):
             status=200
         )
 
-    update_payload = dict(data)
+    if not password_present:
+        return web.json_response(
+            {
+                "status": "error",
+                "code": 400,
+                "message": "Поле password обязательно"
+            },
+            status=200
+        )
 
-    if password_present:
-        update_payload['password'] = hash_password(raw_password.strip())
+    hashed_password = hash_password(raw_password.strip())
 
-    result = await db_user_update(update_payload)
+    try:
+        result = await db_user_update(user_id, email, hashed_password)
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", "Ошибка обновления пользователя в БД", str(e))
+        return web.json_response(
+            {
+                "status": "error",
+                "code": 3,
+                "message": "Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку."
+            },
+            status=200
+        )
 
-    is_success = False
-    if isinstance(result, dict):
-        is_success = result.get('status') == 'success' or result.get('code') == 0
-    elif result:
-        is_success = True
+    is_success = bool(result)
 
     if is_success and password_present:
         if active_block:
@@ -6633,7 +6662,24 @@ async def get_user_update(request):
 
         await clear_active_user_block(user_id=user_id, phone=normalized_phone)
 
-    return web.json_response(result, status=200)
+    if is_success:
+        return web.json_response(
+            {
+                "status": "success",
+                "code": 0,
+                "message": "Данные пользователя успешно обновлены"
+            },
+            status=200
+        )
+
+    return web.json_response(
+        {
+            "status": "error",
+            "code": 1,
+            "message": "Не удалось обновить данные пользователя"
+        },
+        status=200
+    )
 
 async def get_tickets(request):
     """
