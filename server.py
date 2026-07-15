@@ -7363,7 +7363,7 @@ async def get_useremailing(request: web.Request) -> web.Response:
             },
             status=200
         )
-        
+            
 # --- ОБРАБОТЧИК ЭНДПОИНТА ДЛЯ РАСЧЕТА РАСПРЕДЕЛЕНИЯ ПЛАТЕЖА ---
 
 async def get_payment_calculate_distribution(request: web.Request) -> web.Response:
