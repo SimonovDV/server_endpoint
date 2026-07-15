@@ -4589,7 +4589,7 @@ async def cache_user_block(
         )
 
 
-aasync def remove_user_block(user_id=None, phone=None):
+async def remove_user_block(user_id=None, phone=None):
     """
     Снятие блокировки конкретного пользователя по точным связанным ключам: uid и/или phone alias.
     Массовое удаление записей других пользователей не допускается.
