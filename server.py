@@ -8980,3 +8980,4 @@ if __name__ == '__main__':
     except Exception as e:
         print_status("ERROR", f"Критическая ошибка", str(e))
         asyncio.run(shutdown())
+ 
