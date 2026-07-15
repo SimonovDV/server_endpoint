@@ -4589,7 +4589,7 @@ async def cache_user_block(
         )
 
 
-async def remove_user_block(user_id=None, phone=None):
+aasync def remove_user_block(user_id=None, phone=None):
     """
     Снятие блокировки конкретного пользователя по точным связанным ключам: uid и/или phone alias.
     Массовое удаление записей других пользователей не допускается.
@@ -5222,13 +5222,24 @@ async def cleanup_expired_user_blocking_state(force=False):
             f"removed_blocks={removed_blocks}, removed_failed_events={removed_failed_events}, removed_user_locks={removed_user_locks}"
         )
         
-async def ensure_user_request_not_blocked(user_id=None, phone=None, endpoint=None):
+async def ensure_user_request_not_blocked(
+    user_id=None,
+    phone=None,
+    endpoint=None,
+    allow_password_bypass=False,
+    password_present=False
+):
     """
     Название: ensure_user_request_not_blocked
     Назначение: Предварительная локальная проверка блокировки пользователя
     Описание:
         Выполняет проверку до обращения к БД и логирует отказ в запросе,
         если пользователь находится в активной локальной блокировке.
+
+        Специальный режим:
+        - если allow_password_bypass=True и password_present=True,
+          активная блокировка НЕ запрещает выполнение запроса;
+        - используется только для /user/update.
     """
     if verbose_mode:
         print_status(
@@ -5237,7 +5248,9 @@ async def ensure_user_request_not_blocked(user_id=None, phone=None, endpoint=Non
             data_lines=[
                 f"endpoint={endpoint!r}",
                 f"user_id={user_id!r}",
-                f"phone={phone!r}"
+                f"phone={phone!r}",
+                f"allow_password_bypass={allow_password_bypass!r}",
+                f"password_present={password_present!r}"
             ]
         )
 
@@ -5251,6 +5264,21 @@ async def ensure_user_request_not_blocked(user_id=None, phone=None, endpoint=Non
                     f"endpoint={endpoint!r}",
                     f"user_id={user_id!r}",
                     f"phone={phone!r}"
+                ]
+            )
+        return None
+
+    if allow_password_bypass and password_present:
+        if verbose_mode:
+            print_status(
+                "INFO",
+                "ensure_user_request_not_blocked: блокировка найдена, но разрешен bypass по password",
+                data_lines=[
+                    f"endpoint={endpoint!r}",
+                    f"cache_key={active_block.get('cache_key')!r}",
+                    f"user_id={active_block.get('user_id')!r}",
+                    f"normalized_phone={active_block.get('normalized_phone')!r}",
+                    f"blocked_until={active_block.get('blocked_until')!r}"
                 ]
             )
         return None
@@ -5293,7 +5321,6 @@ async def ensure_user_request_not_blocked(user_id=None, phone=None, endpoint=Non
         ),
         status=200
     )
-
 
 async def get_user_operation_lock(user_key: str):
     """
@@ -6795,13 +6822,13 @@ async def get_user_update(request):
     Название: get_user_update
     Назначение: Обновление данных пользователя
     Описание:
-        Реализует специальный режим для заблокированного пользователя:
+        Специальный режим для заблокированного пользователя:
         - если пользователь заблокирован и password отсутствует или пустой,
           запрос отклоняется без обращения к БД;
         - если пользователь заблокирован и password непустой,
           запрос в БД разрешается;
-        - после успешной смены пароля локальная блокировка снимается немедленно.
-        Все обязательные события ТЗ журналируются через log_security_event(...).
+        - после успешной смены пароля локальная блокировка снимается
+          только для конкретного пользователя.
     """
     endpoint = '/user/update'
 
@@ -6861,25 +6888,15 @@ async def get_user_update(request):
 
     active_block = await get_active_user_block(user_id=user_id, phone=normalized_phone)
 
-    if active_block and not password_present:
-        log_security_event(
-            event_type="blocked_db_request_denied",
-            level="WARNING",
-            user_id=user_id,
-            normalized_phone=normalized_phone or active_block.get("normalized_phone"),
-            endpoint=endpoint,
-            reason=active_block.get("reason"),
-            result="denied_non_password_update"
-        )
-
-        return web.json_response(
-            build_user_blocked_response_payload(
-                message=active_block.get("message") or "Пользователь временно заблокирован",
-                blocked_until=active_block.get("blocked_until"),
-                server_time=datetime.now()
-            ),
-            status=200
-        )
+    blocked_response = await ensure_user_request_not_blocked(
+        user_id=user_id,
+        phone=normalized_phone,
+        endpoint=endpoint,
+        allow_password_bypass=True,
+        password_present=password_present
+    )
+    if blocked_response is not None:
+        return blocked_response
 
     if not password_present:
         return web.json_response(
