@@ -2205,7 +2205,7 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
     Название: db_usr_insert
     Назначение: Единая функция вызова хранимой процедуры USR_Insert
     Описание:
-        Выполняет вызов EXECUTE [dbo].[USR_Insert] @USR_Phone = ?,
+        Выполняет вызов EXECUTE [dbo].[USR_Insert_deb_new] @USR_Phone = ?,
         поддерживает как старый скалярный ответ, так и JSON-ответ вида [{"ID": 83}].
     Входящие параметры:
         normalized_phone - нормализованный 10-значный номер телефона
@@ -2219,7 +2219,7 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
         return None
 
     # НЕ УДАЛЯТЬ! ЭТО ЗАГЛУШКА
-    #query = "EXECUTE [dbo].[USR_Insert] @USR_Phone = ?"
+    # query = "EXECUTE [dbo].[USR_Insert] @USR_Phone = ?"
     query = "EXECUTE [dbo].[USR_Insert_deb_new] @USR_Phone = ?"
     cursor = None
 
@@ -2238,13 +2238,18 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
             if cursor.description:
                 columns = [column[0] for column in cursor.description]
                 rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+                if verbose_mode:
+                    print_status("INFO", "Получен результат USR_Insert", f"rows: {rows}")
+
                 if rows:
                     first_row = rows[0]
-                    raw_result = (
-                        first_row.get('ID')
-                        if 'ID' in first_row else
-                        first_row.get('USR_ID')
-                    )
+
+                    if first_row:
+                        # Берем первое значение независимо от имени колонки:
+                        # для FOR JSON PATH это будет JSON_F52E2B61-18A1-11d1-B105-00805F49916B
+                        raw_result = list(first_row.values())[0]
+
         except pyodbc.ProgrammingError:
             pass
 
@@ -2263,10 +2268,19 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
 
         if isinstance(raw_result, str):
             raw_result_str = raw_result.strip()
+
+            if verbose_mode:
+                print_status("INFO", "Сырой результат USR_Insert", f"value: {raw_result_str}")
+
             if raw_result_str.startswith('[') or raw_result_str.startswith('{'):
                 parsed = json.loads(raw_result_str)
+
                 if isinstance(parsed, list) and parsed:
-                    raw_result = parsed[0].get('ID') or parsed[0].get('USR_ID')
+                    first_item = parsed[0]
+                    if isinstance(first_item, dict):
+                        raw_result = first_item.get('ID') or first_item.get('USR_ID')
+                    else:
+                        raw_result = None
                 elif isinstance(parsed, dict):
                     raw_result = parsed.get('ID') or parsed.get('USR_ID')
                 else:
@@ -2317,7 +2331,7 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
                 cursor.close()
         except Exception:
             pass
-
+        
 async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
     """
     Название: db_user_by_phone
@@ -2344,6 +2358,7 @@ async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
         user_id = await db_usr_insert(normalized_phone)
         if user_id is None:
             return None
+        
 
         query = "EXECUTE [dbo].[USR_Select] @USR_Id = ?"
 
