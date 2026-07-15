@@ -5024,20 +5024,15 @@ async def ensure_user_request_not_blocked(user_id=None, phone=None, endpoint=Non
         }
     )
 
-    return create_response(
+    return web.json_response(
         build_user_blocked_response_payload(
             message=active_block.get("message") or "Пользователь временно заблокирован",
             blocked_until=active_block.get("blocked_until"),
             server_time=datetime.now()
         ),
-        request_data={
-            "endpoint": endpoint,
-            "user_id": active_block.get("user_id"),
-            "phone": active_block.get("normalized_phone")
-        },
-        endpoint=endpoint,
         status=200
     )
+
 
 async def get_user_operation_lock(user_key: str):
     """
@@ -6420,19 +6415,15 @@ async def get_user_by_phone_legacy(request):
     try:
         data = await request.json()
     except Exception:
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
     phone = data.get('phone')
-    if not phone:
-        return create_response(
+    if not isinstance(phone, str) or not phone.strip():
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Поле phone обязательно"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -6441,10 +6432,8 @@ async def get_user_by_phone_legacy(request):
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка нормализации телефона", str(e))
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -6458,19 +6447,16 @@ async def get_user_by_phone_legacy(request):
     result = await db_userid(phone=normalized_phone)
 
     if result:
-        return create_response(
+        return web.json_response(
             {"status": "success", "code": 0, "data": result},
-            request_data={"endpoint": endpoint, "phone": normalized_phone},
-            endpoint=endpoint,
             status=200
         )
 
-    return create_response(
+    return web.json_response(
         {"status": "error", "code": 404, "message": "Пользователь не найден"},
-        request_data={"endpoint": endpoint, "phone": normalized_phone},
-        endpoint=endpoint,
         status=200
     )
+
 
 async def get_user_by_phone(request):
     """
@@ -6558,44 +6544,40 @@ async def get_user_update(request):
     """
     endpoint = '/user/update'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
-
     try:
         data = await request.json()
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
+            status=200
+        )
+
+    if not isinstance(data, dict):
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Некорректный формат данных"},
             status=200
         )
 
     user_id = data.get('id') or data.get('user_id')
-    phone = data.get('phone')
-
     normalized_phone = None
-    if phone:
+
+    phone = data.get('phone')
+    if isinstance(phone, str) and phone.strip():
         try:
             normalized_phone = normalize_phone(phone)
         except Exception as e:
             if verbose_mode:
                 print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return create_response(
+            return web.json_response(
                 {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                request_data={"endpoint": endpoint, "phone": phone},
-                endpoint=endpoint,
                 status=200
             )
 
-    if user_id is None and normalized_phone is None:
-        return create_response(
+    if not user_id and not normalized_phone:
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Не указан идентификатор пользователя"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -6615,14 +6597,12 @@ async def get_user_update(request):
             result="denied_non_password_update"
         )
 
-        return create_response(
+        return web.json_response(
             build_user_blocked_response_payload(
                 message=active_block.get("message") or "Пользователь временно заблокирован",
                 blocked_until=active_block.get("blocked_until"),
                 server_time=datetime.now()
             ),
-            request_data={"endpoint": endpoint, "user_id": user_id, "phone": normalized_phone},
-            endpoint=endpoint,
             status=200
         )
 
@@ -6647,18 +6627,13 @@ async def get_user_update(request):
                 user_id=user_id,
                 normalized_phone=normalized_phone,
                 endpoint=endpoint,
-                result="success"
+                reason="password_changed_while_blocked",
+                result="unblocked"
             )
 
-        await remove_user_block(user_id=user_id, phone=normalized_phone)
-        await clear_failed_login_attempts(phone=normalized_phone, user_id=user_id)
+        await clear_active_user_block(user_id=user_id, phone=normalized_phone)
 
-    return create_response(
-        result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
-        request_data={"endpoint": endpoint, "user_id": user_id, "phone": normalized_phone},
-        endpoint=endpoint,
-        status=200
-    )
+    return web.json_response(result, status=200)
 
 async def get_tickets(request):
     """
