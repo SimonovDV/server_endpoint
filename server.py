@@ -4844,7 +4844,6 @@ async def get_active_user_block(user_id=None, phone=None):
                 }
 
             blocked_users.pop(key, None)
-
     return None
 
 
