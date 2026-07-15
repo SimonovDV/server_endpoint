@@ -7418,35 +7418,18 @@ async def get_documentlist(request):
         ДО любого обращения к БД. Если пользователь заблокирован, запрос
         отклоняется без вызова db_userid, db_documentlist и других DB-функций.
 
-        Аутентификация выполняется корректно: токен сохраняется в request,
-        но не возвращается клиенту как тело ответа.
+        Повторная аутентификация внутри handler не выполняется, так как
+        стандартная проверка уже выполняется в middleware.
     """
     endpoint = '/document/list'
-
-    try:
-        token = await authenticate_request(request)
-        request.authenticated_token = token
-    except web.HTTPException as e:
-        raise e
-    except Exception as e:
-        if verbose_mode:
-            print_status("ERROR", "Ошибка аутентификации запроса", str(e))
-        return create_response(
-            {"status": "error", "code": 401, "message": "Ошибка аутентификации"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
-            status=200
-        )
 
     try:
         data = await request.json()
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -7460,18 +7443,14 @@ async def get_documentlist(request):
         except Exception as e:
             if verbose_mode:
                 print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return create_response(
+            return web.json_response(
                 {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                request_data={"endpoint": endpoint, "phone": phone},
-                endpoint=endpoint,
                 status=200
             )
 
     if user_id is None and normalized_phone is None:
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Не указан идентификатор пользователя"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -7486,10 +7465,11 @@ async def get_documentlist(request):
     target_user_id = data.get('user_id') or data.get('id')
     result = await db_documentlist(str(target_user_id))
 
-    return create_response(
-        result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
-        request_data={"endpoint": endpoint, "user_id": user_id, "phone": normalized_phone},
-        endpoint=endpoint,
+    if isinstance(result, dict):
+        return web.json_response(result, status=200)
+
+    return web.json_response(
+        {"status": "success", "code": 0, "data": result},
         status=200
     )
 
@@ -9230,4 +9210,3 @@ if __name__ == '__main__':
     except Exception as e:
         print_status("ERROR", f"Критическая ошибка", str(e))
         asyncio.run(shutdown())
- 
