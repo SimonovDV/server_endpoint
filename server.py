@@ -6752,7 +6752,8 @@ async def get_user_by_phone(request):
     Назначение: Получение информации о пользователе по номеру телефона
     Описание:
         Выполняет предварительную проверку блокировки пользователя по нормализованному
-        номеру телефона ДО обращения к БД, как требует ТЗ.
+        номеру телефона ДО обращения к БД.
+        Эндпоинт должен блокироваться по правилам блокировки пользователя.
     """
     endpoint = '/user/by-phone'
 
@@ -6965,10 +6966,8 @@ async def get_tickets(request):
     Название: get_tickets
     Назначение: Получение списка залоговых билетов пользователя
     Описание:
-        Выполняет предварительную проверку блокировки пользователя ДО любого обращения к БД.
-        Если пользователь заблокирован, запрос отклоняется без вызова db_tickets
-        и любых других функций доступа к БД.
-        Аутентификация повторно не выполняется, так как уже была выполнена в auth_middleware.
+        Эндпоинт должен блокироваться по правилам блокировки пользователя.
+        Проверка блокировки выполняется ДО любого обращения к БД.
     """
     endpoint = '/ticket/list'
 
@@ -7012,8 +7011,6 @@ async def get_tickets(request):
     if blocked_response is not None:
         return blocked_response
 
-    # По ТЗ и по контракту db_tickets передаем только простые параметры,
-    # а не весь JSON словарь запроса.
     if user_id is None:
         return web.json_response(
             {"status": "error", "code": 400, "message": "Для /ticket/list требуется user_id"},
@@ -7480,6 +7477,13 @@ async def get_documentlist(request):
 
 
 async def get_useremailing(request: web.Request) -> web.Response:
+    """
+    Название: get_useremailing
+    Назначение: Управление согласием на email рассылку пользователя
+    Описание:
+        Эндпоинт должен блокироваться по правилам блокировки пользователя.
+        Проверка блокировки выполняется до обращения к БД.
+    """
     endpoint = request.path
 
     try:
@@ -7559,7 +7563,8 @@ async def get_useremailing(request: web.Request) -> web.Response:
             },
             status=200
         )
-                
+
+
 # --- ОБРАБОТЧИК ЭНДПОИНТА ДЛЯ РАСЧЕТА РАСПРЕДЕЛЕНИЯ ПЛАТЕЖА ---
 
 async def get_payment_calculate_distribution(request: web.Request) -> web.Response:
