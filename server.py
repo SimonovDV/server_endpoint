@@ -3450,8 +3450,11 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
             print_status("INFO", f"Вызов хранимой процедуры DOC_Select_ID", 
                         f"user_id: {user_id_int}")
         
+        """
+        НЕ УЛАЛЯТЬ ! это заглушка
         query = "EXECUTE [dbo].[DOC_Select_ID] @USR_ID = ?"
-        
+        """
+        query = "EXECUTE [dbo].[DOC_Select_ID_deb_json] @USR_ID = ?"        
         cursor = db_connection.cursor()
         
         # Устанавливаем таймаут выполнения (30 секунд)
