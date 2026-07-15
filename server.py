@@ -3646,7 +3646,7 @@ async def db_useremailing(user_id: int, consent_to_mailing: bool) -> bool:
         raise Exception("База данных не доступна")
     
     try:
-        query = "EXECUTE [dbo].[USR_Update_ConsentToMailing] @USR_ID = ?, @USR_consent_to_mailing = ?"
+        query = "EXECUTE [dbo].[USR_Update_consent_to_mailing] @USR_ID = ?, @USR_consent_to_mailing = ?"
         
         if verbose_mode:
             consent_text = "согласие получено" if consent_to_mailing else "отказ от рассылки"
