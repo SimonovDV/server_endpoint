@@ -1921,14 +1921,14 @@ async def extract_request_user_identity(request: web.Request) -> dict:
     except Exception:
         return result
     
-async def build_block_primary_key(user_id=None, phone=None):
+async def build_block_primary_key(user_id=None, phone=None, normalized_phone=None):
     """
     Канонический ключ блокировки.
 
     Правило:
     - ключ блокировки всегда имеет формат uid:<user_id>
-    - если user_id не передан, но передан phone, выполняется попытка
-      определить user_id напрямую через DB-функцию db_user_by_phone(...)
+    - если user_id не передан, но передан phone/normalized_phone, выполняется
+      попытка определить user_id напрямую через DB-функцию db_user_by_phone(...)
       без использования HTTP endpoint /user/by-phone
     - если user_id определить не удалось, возвращается None
     """
@@ -1940,12 +1940,22 @@ async def build_block_primary_key(user_id=None, phone=None):
         except Exception:
             resolved_user_id = None
 
-    if resolved_user_id is None and phone:
+    phone_value = normalized_phone if normalized_phone else phone
+
+    if resolved_user_id is None and phone_value:
         try:
-            normalized_phone = normalize_phone(phone) if not str(phone).isdigit() or len(str(phone)) != 10 else str(phone)
-            user_data = await db_user_by_phone(normalized_phone)
+            if str(phone_value).isdigit() and len(str(phone_value)) == 10:
+                phone_for_lookup = str(phone_value)
+            else:
+                phone_for_lookup = normalize_phone(phone_value)
+
+            user_data = await db_user_by_phone(phone_for_lookup)
             if user_data:
-                raw_user_id = user_data.get("id") or user_data.get("user_id") or user_data.get("USR_Id")
+                raw_user_id = (
+                    user_data.get("id")
+                    or user_data.get("user_id")
+                    or user_data.get("USR_Id")
+                )
                 if raw_user_id is not None and str(raw_user_id).strip() != "":
                     resolved_user_id = int(raw_user_id)
 
@@ -1954,7 +1964,7 @@ async def build_block_primary_key(user_id=None, phone=None):
                             "INFO",
                             "build_block_primary_key: user_id вычислен по телефону",
                             data_lines=[
-                                f"phone={normalized_phone!r}",
+                                f"phone={phone_for_lookup!r}",
                                 f"resolved_user_id={resolved_user_id!r}"
                             ]
                         )
@@ -1964,7 +1974,7 @@ async def build_block_primary_key(user_id=None, phone=None):
                     "ERROR",
                     "build_block_primary_key: не удалось вычислить user_id по телефону",
                     data_lines=[
-                        f"phone={phone!r}",
+                        f"phone={phone_value!r}",
                         f"error={str(e)}"
                     ]
                 )
@@ -1973,7 +1983,6 @@ async def build_block_primary_key(user_id=None, phone=None):
         return f"uid:{resolved_user_id}"
 
     return None
-
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ MSSQL ---
 
@@ -4517,15 +4526,17 @@ async def set_user_block(*args, **kwargs):
     """
     raise RuntimeError("Самостоятельная установка блокировки на стороне ПБД запрещена ТЗ. Используйте cache_user_block() только для блокировок, полученных от БД.")
 
-async def cache_user_block(user_id=None, phone=None, blocked_from=None, blocked_until=None,
+async def cache_user_block(user_id=None, phone=None, normalized_phone=None,
+                           blocked_from=None, blocked_until=None,
                            reason=None, message=None, db_current_timestamp=None,
                            clock_skew_seconds=None):
     """
     Сохраняет блокировку пользователя в памяти только по каноническому ключу uid:<user_id>.
 
-    Если user_id не передан, но передан phone, user_id вычисляется через
-    прямой DB-вызов db_user_by_phone(...). Если вычислить user_id не удалось,
-    блокировка не сохраняется.
+    Совместимость:
+    - поддерживает старые внутренние вызовы с normalized_phone=
+    - поддерживает новые вызовы с phone=
+    - фактически использует один источник телефона для вычисления user_id
     """
     global blocked_users, blocked_user_lock, max_blocked_users_cache_size
 
@@ -4535,14 +4546,19 @@ async def cache_user_block(user_id=None, phone=None, blocked_from=None, blocked_
     if blocked_users is None or not isinstance(blocked_users, dict):
         blocked_users = {}
 
-    normalized_phone = None
-    if phone:
-        try:
-            normalized_phone = normalize_phone(phone)
-        except Exception:
-            normalized_phone = str(phone).strip()
+    phone_value = normalized_phone if normalized_phone else phone
 
-    primary_key = await build_block_primary_key(user_id=user_id, phone=normalized_phone)
+    normalized_phone_value = None
+    if phone_value:
+        try:
+            normalized_phone_value = normalize_phone(phone_value)
+        except Exception:
+            normalized_phone_value = str(phone_value).strip()
+
+    primary_key = await build_block_primary_key(
+        user_id=user_id,
+        normalized_phone=normalized_phone_value
+    )
 
     resolved_user_id = None
     if primary_key and primary_key.startswith("uid:"):
@@ -4559,7 +4575,8 @@ async def cache_user_block(user_id=None, phone=None, blocked_from=None, blocked_
                 data_lines=[
                     f"user_id={user_id!r}",
                     f"phone={phone!r}",
-                    f"normalized_phone={normalized_phone!r}"
+                    f"normalized_phone={normalized_phone!r}",
+                    f"normalized_phone_value={normalized_phone_value!r}"
                 ]
             )
         return None
@@ -4588,7 +4605,7 @@ async def cache_user_block(user_id=None, phone=None, blocked_from=None, blocked_
                 "cache_user_block: blocked_until отсутствует или имеет неверный формат",
                 data_lines=[
                     f"user_id={resolved_user_id!r}",
-                    f"phone={normalized_phone!r}",
+                    f"normalized_phone={normalized_phone_value!r}",
                     f"blocked_until={blocked_until!r}"
                 ]
             )
@@ -4597,7 +4614,7 @@ async def cache_user_block(user_id=None, phone=None, blocked_from=None, blocked_
     item = {
         "cache_key": primary_key,
         "user_id": resolved_user_id,
-        "normalized_phone": normalized_phone,
+        "normalized_phone": normalized_phone_value,
         "blocked_from": blocked_from,
         "blocked_until": blocked_until,
         "reason": reason,
@@ -4631,7 +4648,7 @@ async def cache_user_block(user_id=None, phone=None, blocked_from=None, blocked_
     emit_security_event(
         "memory_block_set",
         user_id=resolved_user_id,
-        normalized_phone=normalized_phone,
+        normalized_phone=normalized_phone_value,
         endpoint=None,
         reason=reason or "db_reported_block",
         result="stored",
@@ -4660,7 +4677,7 @@ async def cache_user_block(user_id=None, phone=None, blocked_from=None, blocked_
             data_lines=[
                 f"primary_key={primary_key}",
                 f"user_id={resolved_user_id!r}",
-                f"normalized_phone={normalized_phone!r}",
+                f"normalized_phone={normalized_phone_value!r}",
                 f"blocked_from={blocked_from!r}",
                 f"blocked_until={blocked_until!r}",
                 f"type(blocked_until)={type(blocked_until).__name__}",
@@ -4672,6 +4689,7 @@ async def cache_user_block(user_id=None, phone=None, blocked_from=None, blocked_
         )
 
     return item
+
 
 async def remove_user_block(user_id=None, phone=None):
     """
