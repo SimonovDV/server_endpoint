@@ -7418,6 +7418,8 @@ async def get_documentlist(request):
         ДО любого обращения к БД. Если пользователь заблокирован, запрос
         отклоняется без вызова db_userid, db_documentlist и других DB-функций.
 
+        Формирование ответа при активной блокировке должно выполняться через
+        build_user_blocked_response_payload внутри ensure_user_request_not_blocked.
         Повторная аутентификация внутри handler не выполняется, так как
         стандартная проверка уже выполняется в middleware.
     """
@@ -7472,7 +7474,6 @@ async def get_documentlist(request):
         {"status": "success", "code": 0, "data": result},
         status=200
     )
-
 
 async def get_useremailing(request: web.Request) -> web.Response:
     """
