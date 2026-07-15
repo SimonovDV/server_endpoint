@@ -4504,6 +4504,19 @@ async def cache_user_block(
 
     primary_key = build_block_primary_key(user_id=user_id, phone=normalized_phone)
     if primary_key is None:
+        if verbose_mode:
+            print_status(
+                "ERROR",
+                "cache_user_block: блокировка не сохранена",
+                "не удалось построить primary_key",
+                data_lines=[
+                    f"user_id={user_id!r}",
+                    f"normalized_phone={normalized_phone!r}",
+                    f"blocked_from={blocked_from!r}",
+                    f"blocked_until={blocked_until!r}",
+                    f"type(blocked_until)={type(blocked_until).__name__}"
+                ]
+            )
         return
 
     record = {
@@ -4544,6 +4557,37 @@ async def cache_user_block(
         }
     )
 
+    if verbose_mode:
+        snapshot_lines = []
+        for key, item in blocked_users.items():
+            if isinstance(item, dict):
+                snapshot_lines.append(
+                    f"{key} -> user_id={item.get('user_id')!r}, "
+                    f"normalized_phone={item.get('normalized_phone')!r}, "
+                    f"blocked_until={item.get('blocked_until')!r}, "
+                    f"type(blocked_until)={type(item.get('blocked_until')).__name__}, "
+                    f"alias={item.get('__alias__')!r}"
+                )
+            else:
+                snapshot_lines.append(f"{key} -> {item!r}")
+
+        print_status(
+            "INFO",
+            "cache_user_block: блокировка сохранена в памяти",
+            data_lines=[
+                f"primary_key={primary_key}",
+                f"phone_alias_key={phone_alias_key}",
+                f"user_id={record.get('user_id')!r}",
+                f"normalized_phone={normalized_phone!r}",
+                f"blocked_from={blocked_from!r}",
+                f"blocked_until={blocked_until!r}",
+                f"type(blocked_until)={type(blocked_until).__name__}",
+                f"db_current_timestamp={db_current_timestamp!r}",
+                f"clock_skew_seconds={clock_skew_seconds!r}",
+                "Снимок blocked_users:"
+            ] + snapshot_lines
+        )
+
 
 async def remove_user_block(user_id=None, phone=None):
     """
@@ -4562,6 +4606,18 @@ async def remove_user_block(user_id=None, phone=None):
 
     uid_key = f"uid:{int(user_id)}" if user_id is not None and str(user_id).strip() != "" else None
     phone_key = f"phone:{phone}" if phone else None
+
+    if verbose_mode:
+        print_status(
+            "INFO",
+            "remove_user_block: попытка снять блокировку",
+            data_lines=[
+                f"user_id={user_id!r}",
+                f"phone={phone!r}",
+                f"uid_key={uid_key!r}",
+                f"phone_key={phone_key!r}"
+            ]
+        )
 
     async with blocked_user_lock:
         candidate_keys = [k for k in [uid_key, phone_key] if k]
@@ -4612,6 +4668,21 @@ async def remove_user_block(user_id=None, phone=None):
             normalized_phone=phone,
             result="removed",
             details={"removed_keys": removed_keys}
+        )
+
+    if verbose_mode:
+        snapshot_lines = []
+        for key, item in blocked_users.items():
+            snapshot_lines.append(f"{key} -> {item!r}")
+
+        print_status(
+            "INFO",
+            "remove_user_block: результат снятия блокировки",
+            data_lines=[
+                f"removed={removed}",
+                f"removed_keys={removed_keys!r}",
+                "Снимок blocked_users после удаления:"
+            ] + snapshot_lines
         )
 
     return removed
@@ -4815,21 +4886,98 @@ async def get_active_user_block(user_id=None, phone=None):
     if phone:
         lookup_keys.append(f"phone:{phone}")
 
+    if verbose_mode:
+        print_status(
+            "INFO",
+            "get_active_user_block: начало поиска блокировки",
+            data_lines=[
+                f"user_id={user_id!r}",
+                f"phone={phone!r}",
+                f"primary_key={primary_key!r}",
+                f"lookup_keys={list(dict.fromkeys(lookup_keys))!r}",
+                f"blocked_users_size={len(blocked_users)}",
+                f"now={now.isoformat()}"
+            ]
+        )
+
     async with blocked_user_lock:
         for key in dict.fromkeys(lookup_keys):
             item = blocked_users.get(key)
+
+            if verbose_mode:
+                print_status(
+                    "INFO",
+                    "get_active_user_block: проверка ключа",
+                    data_lines=[
+                        f"key={key!r}",
+                        f"exists={item is not None}",
+                        f"raw_item={item!r}"
+                    ]
+                )
+
             if not item:
                 continue
 
             if isinstance(item, dict) and "__alias__" in item:
-                item = blocked_users.get(item["__alias__"])
+                alias_target = item["__alias__"]
+                if verbose_mode:
+                    print_status(
+                        "INFO",
+                        "get_active_user_block: найден alias",
+                        data_lines=[
+                            f"alias_key={key!r}",
+                            f"alias_target={alias_target!r}"
+                        ]
+                    )
+                item = blocked_users.get(alias_target)
 
             if not isinstance(item, dict):
+                if verbose_mode:
+                    print_status(
+                        "ERROR",
+                        "get_active_user_block: запись имеет некорректный формат",
+                        data_lines=[
+                            f"key={key!r}",
+                            f"item={item!r}"
+                        ]
+                    )
                 continue
 
             blocked_until = item.get("blocked_until")
+
+            if verbose_mode:
+                print_status(
+                    "INFO",
+                    "get_active_user_block: анализ найденной записи",
+                    data_lines=[
+                        f"key={key!r}",
+                        f"cache_key={item.get('cache_key')!r}",
+                        f"user_id={item.get('user_id')!r}",
+                        f"normalized_phone={item.get('normalized_phone')!r}",
+                        f"blocked_from={item.get('blocked_from')!r}",
+                        f"blocked_until={blocked_until!r}",
+                        f"type(blocked_until)={type(blocked_until).__name__}",
+                        f"is_datetime={isinstance(blocked_until, datetime)}",
+                        f"is_active={(isinstance(blocked_until, datetime) and blocked_until > now)!r}"
+                    ]
+                )
+
             if isinstance(blocked_until, datetime) and blocked_until > now:
                 item["updated_at"] = now
+
+                if verbose_mode:
+                    print_status(
+                        "WARNING",
+                        "get_active_user_block: активная блокировка найдена",
+                        data_lines=[
+                            f"resolved_key={key!r}",
+                            f"cache_key={item.get('cache_key')!r}",
+                            f"user_id={item.get('user_id')!r}",
+                            f"normalized_phone={item.get('normalized_phone')!r}",
+                            f"blocked_until={blocked_until.isoformat()}"
+                        ]
+                    )
+
                 return {
                     "cache_key": item.get("cache_key"),
                     "user_id": item.get("user_id"),
@@ -4843,9 +4991,30 @@ async def get_active_user_block(user_id=None, phone=None):
                     "updated_at": item.get("updated_at")
                 }
 
-            blocked_users.pop(key, None)
-    return None
+            if verbose_mode:
+                print_status(
+                    "INFO",
+                    "get_active_user_block: запись неактивна, удаляется",
+                    data_lines=[
+                        f"key={key!r}",
+                        f"blocked_until={blocked_until!r}",
+                        f"type(blocked_until)={type(blocked_until).__name__}"
+                    ]
+                )
 
+            blocked_users.pop(key, None)
+
+    if verbose_mode:
+        print_status(
+            "INFO",
+            "get_active_user_block: активная блокировка не найдена",
+            data_lines=[
+                f"user_id={user_id!r}",
+                f"phone={phone!r}"
+            ]
+        )
+
+    return None
 
 async def cleanup_expired_user_blocking_state(force=False):
     """
@@ -5056,8 +5225,29 @@ async def ensure_user_request_not_blocked(user_id=None, phone=None, endpoint=Non
         Выполняет проверку до обращения к БД и логирует отказ в запросе,
         если пользователь находится в активной локальной блокировке.
     """
+    if verbose_mode:
+        print_status(
+            "INFO",
+            "ensure_user_request_not_blocked: проверка доступа",
+            data_lines=[
+                f"endpoint={endpoint!r}",
+                f"user_id={user_id!r}",
+                f"phone={phone!r}"
+            ]
+        )
+
     active_block = await get_active_user_block(user_id=user_id, phone=phone)
     if active_block is None:
+        if verbose_mode:
+            print_status(
+                "INFO",
+                "ensure_user_request_not_blocked: блокировка отсутствует",
+                data_lines=[
+                    f"endpoint={endpoint!r}",
+                    f"user_id={user_id!r}",
+                    f"phone={phone!r}"
+                ]
+            )
         return None
 
     log_security_event(
@@ -5074,6 +5264,21 @@ async def ensure_user_request_not_blocked(user_id=None, phone=None, endpoint=Non
             "cache_key": active_block.get("cache_key")
         }
     )
+
+    if verbose_mode:
+        print_status(
+            "WARNING",
+            "ensure_user_request_not_blocked: доступ запрещен активной блокировкой",
+            data_lines=[
+                f"endpoint={endpoint!r}",
+                f"cache_key={active_block.get('cache_key')!r}",
+                f"user_id={active_block.get('user_id')!r}",
+                f"normalized_phone={active_block.get('normalized_phone')!r}",
+                f"blocked_from={active_block.get('blocked_from')!r}",
+                f"blocked_until={active_block.get('blocked_until')!r}",
+                f"reason={active_block.get('reason')!r}"
+            ]
+        )
 
     return web.json_response(
         build_user_blocked_response_payload(
