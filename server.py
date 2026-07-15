@@ -3353,7 +3353,7 @@ async def db_documentsigned(document_id: str, is_signed: bool) -> bool:
             print_status("INFO", f"Вызов хранимой процедуры Doc_Update_signed", 
                         f"document_id: {doc_id_int}, is_signed: {doc_is_signed_int} ({'подписан' if is_signed else 'отклонен'})")
         
-        query = "EXECUTE [dbo].[DCT_Update_signed] @DOC_Id = ?, @DOC_Is_signed = ?"
+        query = "EXECUTE [dbo].[Doc_Update_signed] @DOC_Id = ?, @DOC_Is_signed = ?"
         
         cursor = db_connection.cursor()
         
@@ -3450,7 +3450,7 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
             print_status("INFO", f"Вызов хранимой процедуры DOC_Select_ID", 
                         f"user_id: {user_id_int}")
         
-        query = "EXECUTE [dbo].[DCT_Select] @USR_ID = ?"
+        query = "EXECUTE [dbo].[DOC_Select_ID] @USR_ID = ?"
         
         cursor = db_connection.cursor()
         
@@ -7352,22 +7352,20 @@ async def get_documentsigned(request):
         ДО любого обращения к БД. Если пользователя можно определить по входным
         параметрам и он находится в активной блокировке, запрос отклоняется
         без вызова db_documentsigned и других DB-функций.
+
+        Эндпоинт не должен вручную переаутентифицировать запрос и не должен
+        формировать ответ через create_response, чтобы не добавлять служебные
+        заголовки Token/Signature повторно.
     """
     endpoint = '/document/signed'
-
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
 
     try:
         data = await request.json()
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return create_response(
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -7381,10 +7379,8 @@ async def get_documentsigned(request):
         except Exception as e:
             if verbose_mode:
                 print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return create_response(
+            return web.json_response(
                 {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                request_data={"endpoint": endpoint, "phone": phone},
-                endpoint=endpoint,
                 status=200
             )
 
@@ -7397,12 +7393,16 @@ async def get_documentsigned(request):
         if blocked_response is not None:
             return blocked_response
 
-    result = await db_documentsigned(document_id=data.get('document_id') or data.get('doc_id'), is_signed=bool(data.get('is_signed')))
+    document_id = data.get('document_id') or data.get('doc_id')
+    is_signed = bool(data.get('is_signed'))
 
-    return create_response(
+    result = await db_documentsigned(
+        document_id=document_id,
+        is_signed=is_signed
+    )
+
+    return web.json_response(
         result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
-        request_data={"endpoint": endpoint, "user_id": user_id, "phone": normalized_phone},
-        endpoint=endpoint,
         status=200
     )
 
@@ -7414,12 +7414,26 @@ async def get_documentlist(request):
         Выполняет обязательную предварительную проверку блокировки пользователя
         ДО любого обращения к БД. Если пользователь заблокирован, запрос
         отклоняется без вызова db_userid, db_documentlist и других DB-функций.
+
+        Аутентификация выполняется корректно: токен сохраняется в request,
+        но не возвращается клиенту как тело ответа.
     """
     endpoint = '/document/list'
 
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    try:
+        token = await authenticate_request(request)
+        request.authenticated_token = token
+    except web.HTTPException as e:
+        raise e
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", "Ошибка аутентификации запроса", str(e))
+        return create_response(
+            {"status": "error", "code": 401, "message": "Ошибка аутентификации"},
+            request_data={"endpoint": endpoint},
+            endpoint=endpoint,
+            status=200
+        )
 
     try:
         data = await request.json()
@@ -7466,7 +7480,8 @@ async def get_documentlist(request):
     if blocked_response is not None:
         return blocked_response
 
-    result = await db_documentlist(str(data.get('user_id') or data.get('id')))
+    target_user_id = data.get('user_id') or data.get('id')
+    result = await db_documentlist(str(target_user_id))
 
     return create_response(
         result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
