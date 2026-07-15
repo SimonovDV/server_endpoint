@@ -1921,19 +1921,59 @@ async def extract_request_user_identity(request: web.Request) -> dict:
     except Exception:
         return result
     
-def build_block_primary_key(user_id=None, phone=None):
+async def build_block_primary_key(user_id=None, phone=None):
     """
     Канонический ключ блокировки.
-    Приоритет всегда у user_id, телефон используется только как fallback.
-    """
-    if user_id is not None and str(user_id).strip() != "":
-        return f"uid:{int(user_id)}"
 
-    if phone:
-        normalized_phone = normalize_phone(phone) if not str(phone).isdigit() or len(str(phone)) != 10 else str(phone)
-        return f"phone:{normalized_phone}"
+    Правило:
+    - ключ блокировки всегда имеет формат uid:<user_id>
+    - если user_id не передан, но передан phone, выполняется попытка
+      определить user_id напрямую через DB-функцию db_user_by_phone(...)
+      без использования HTTP endpoint /user/by-phone
+    - если user_id определить не удалось, возвращается None
+    """
+    resolved_user_id = None
+
+    if user_id is not None and str(user_id).strip() != "":
+        try:
+            resolved_user_id = int(user_id)
+        except Exception:
+            resolved_user_id = None
+
+    if resolved_user_id is None and phone:
+        try:
+            normalized_phone = normalize_phone(phone) if not str(phone).isdigit() or len(str(phone)) != 10 else str(phone)
+            user_data = await db_user_by_phone(normalized_phone)
+            if user_data:
+                raw_user_id = user_data.get("id") or user_data.get("user_id") or user_data.get("USR_Id")
+                if raw_user_id is not None and str(raw_user_id).strip() != "":
+                    resolved_user_id = int(raw_user_id)
+
+                    if verbose_mode:
+                        print_status(
+                            "INFO",
+                            "build_block_primary_key: user_id вычислен по телефону",
+                            data_lines=[
+                                f"phone={normalized_phone!r}",
+                                f"resolved_user_id={resolved_user_id!r}"
+                            ]
+                        )
+        except Exception as e:
+            if verbose_mode:
+                print_status(
+                    "ERROR",
+                    "build_block_primary_key: не удалось вычислить user_id по телефону",
+                    data_lines=[
+                        f"phone={phone!r}",
+                        f"error={str(e)}"
+                    ]
+                )
+
+    if resolved_user_id is not None:
+        return f"uid:{resolved_user_id}"
 
     return None
+
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ MSSQL ---
 
@@ -4477,23 +4517,17 @@ async def set_user_block(*args, **kwargs):
     """
     raise RuntimeError("Самостоятельная установка блокировки на стороне ПБД запрещена ТЗ. Используйте cache_user_block() только для блокировок, полученных от БД.")
 
-async def cache_user_block(
-    user_id=None,
-    normalized_phone=None,
-    blocked_from=None,
-    blocked_until=None,
-    reason='db_reported_block',
-    db_current_timestamp=None,
-    clock_skew_seconds=None,
-    message=None
-):
+async def cache_user_block(user_id=None, phone=None, blocked_from=None, blocked_until=None,
+                           reason=None, message=None, db_current_timestamp=None,
+                           clock_skew_seconds=None):
     """
-    Кэширование блокировки в едином формате.
-    Каноническая запись хранится по uid:<id>, если user_id известен.
-    Если user_id неизвестен, временно храним по phone:<normalized_phone>.
-    При наличии обоих идентификаторов телефонный ключ выступает alias на ту же запись.
+    Сохраняет блокировку пользователя в памяти только по каноническому ключу uid:<user_id>.
+
+    Если user_id не передан, но передан phone, user_id вычисляется через
+    прямой DB-вызов db_user_by_phone(...). Если вычислить user_id не удалось,
+    блокировка не сохраняется.
     """
-    global blocked_users, blocked_user_lock
+    global blocked_users, blocked_user_lock, max_blocked_users_cache_size
 
     if blocked_user_lock is None:
         blocked_user_lock = asyncio.Lock()
@@ -4501,30 +4535,68 @@ async def cache_user_block(
     if blocked_users is None or not isinstance(blocked_users, dict):
         blocked_users = {}
 
-    now = datetime.now()
-    blocked_from = blocked_from or now
-    blocked_until = blocked_until or now
+    normalized_phone = None
+    if phone:
+        try:
+            normalized_phone = normalize_phone(phone)
+        except Exception:
+            normalized_phone = str(phone).strip()
 
-    primary_key = build_block_primary_key(user_id=user_id, phone=normalized_phone)
-    if primary_key is None:
+    primary_key = await build_block_primary_key(user_id=user_id, phone=normalized_phone)
+
+    resolved_user_id = None
+    if primary_key and primary_key.startswith("uid:"):
+        try:
+            resolved_user_id = int(primary_key.split(":", 1)[1])
+        except Exception:
+            resolved_user_id = None
+
+    if primary_key is None or resolved_user_id is None:
         if verbose_mode:
             print_status(
-                "ERROR",
-                "cache_user_block: блокировка не сохранена",
-                "не удалось построить primary_key",
+                "WARNING",
+                "cache_user_block: не удалось сформировать канонический ключ блокировки",
                 data_lines=[
                     f"user_id={user_id!r}",
-                    f"normalized_phone={normalized_phone!r}",
-                    f"blocked_from={blocked_from!r}",
-                    f"blocked_until={blocked_until!r}",
-                    f"type(blocked_until)={type(blocked_until).__name__}"
+                    f"phone={phone!r}",
+                    f"normalized_phone={normalized_phone!r}"
                 ]
             )
-        return
+        return None
 
-    record = {
+    now = datetime.now()
+
+    if blocked_from is None:
+        blocked_from = now
+
+    if isinstance(blocked_from, str):
+        try:
+            blocked_from = datetime.fromisoformat(blocked_from)
+        except Exception:
+            blocked_from = now
+
+    if isinstance(blocked_until, str):
+        try:
+            blocked_until = datetime.fromisoformat(blocked_until)
+        except Exception:
+            blocked_until = None
+
+    if not isinstance(blocked_until, datetime):
+        if verbose_mode:
+            print_status(
+                "WARNING",
+                "cache_user_block: blocked_until отсутствует или имеет неверный формат",
+                data_lines=[
+                    f"user_id={resolved_user_id!r}",
+                    f"phone={normalized_phone!r}",
+                    f"blocked_until={blocked_until!r}"
+                ]
+            )
+        return None
+
+    item = {
         "cache_key": primary_key,
-        "user_id": int(user_id) if user_id is not None and str(user_id).strip() != "" else None,
+        "user_id": resolved_user_id,
         "normalized_phone": normalized_phone,
         "blocked_from": blocked_from,
         "blocked_until": blocked_until,
@@ -4532,65 +4604,74 @@ async def cache_user_block(
         "message": message,
         "db_current_timestamp": db_current_timestamp,
         "clock_skew_seconds": clock_skew_seconds,
+        "created_at": now,
         "updated_at": now
     }
 
-    phone_alias_key = f"phone:{normalized_phone}" if normalized_phone else None
-
     async with blocked_user_lock:
-        blocked_users[primary_key] = record
+        if max_blocked_users_cache_size and len(blocked_users) >= max_blocked_users_cache_size:
+            removable_key = None
+            oldest_updated_at = None
 
-        if phone_alias_key and phone_alias_key != primary_key:
-            blocked_users[phone_alias_key] = {
-                "__alias__": primary_key,
-                "updated_at": now
-            }
+            for key, value in blocked_users.items():
+                if not isinstance(value, dict):
+                    removable_key = key
+                    break
 
-    log_security_event(
-        event_type="memory_block_set",
-        level="WARNING",
-        user_id=record.get("user_id"),
+                candidate_updated_at = value.get("updated_at") or value.get("created_at") or now
+                if oldest_updated_at is None or candidate_updated_at < oldest_updated_at:
+                    oldest_updated_at = candidate_updated_at
+                    removable_key = key
+
+            if removable_key is not None:
+                blocked_users.pop(removable_key, None)
+
+        blocked_users[primary_key] = item
+
+    emit_security_event(
+        "memory_block_set",
+        user_id=resolved_user_id,
         normalized_phone=normalized_phone,
-        reason=reason,
+        endpoint=None,
+        reason=reason or "db_reported_block",
         result="stored",
         details={
             "primary_key": primary_key,
-            "phone_alias_key": phone_alias_key,
             "blocked_until": blocked_until.isoformat() if isinstance(blocked_until, datetime) else str(blocked_until)
         }
     )
 
     if verbose_mode:
         snapshot_lines = []
-        for key, item in blocked_users.items():
-            if isinstance(item, dict):
+        for key, value in blocked_users.items():
+            if isinstance(value, dict):
                 snapshot_lines.append(
-                    f"{key} -> user_id={item.get('user_id')!r}, "
-                    f"normalized_phone={item.get('normalized_phone')!r}, "
-                    f"blocked_until={item.get('blocked_until')!r}, "
-                    f"type(blocked_until)={type(item.get('blocked_until')).__name__}, "
-                    f"alias={item.get('__alias__')!r}"
+                    f"{key} -> user_id={value.get('user_id')!r}, "
+                    f"normalized_phone={value.get('normalized_phone')!r}, "
+                    f"blocked_until={value.get('blocked_until')!r}, "
+                    f"type(blocked_until)={type(value.get('blocked_until')).__name__}"
                 )
             else:
-                snapshot_lines.append(f"{key} -> {item!r}")
+                snapshot_lines.append(f"{key} -> {value!r}")
 
         print_status(
             "INFO",
             "cache_user_block: блокировка сохранена в памяти",
             data_lines=[
                 f"primary_key={primary_key}",
-                f"phone_alias_key={phone_alias_key}",
-                f"user_id={record.get('user_id')!r}",
+                f"user_id={resolved_user_id!r}",
                 f"normalized_phone={normalized_phone!r}",
                 f"blocked_from={blocked_from!r}",
                 f"blocked_until={blocked_until!r}",
                 f"type(blocked_until)={type(blocked_until).__name__}",
                 f"db_current_timestamp={db_current_timestamp!r}",
                 f"clock_skew_seconds={clock_skew_seconds!r}",
-                "Снимок blocked_users:"
-            ] + snapshot_lines
+                "Снимок blocked_users:",
+                *snapshot_lines
+            ]
         )
 
+    return item
 
 async def remove_user_block(user_id=None, phone=None):
     """
@@ -4872,7 +4953,11 @@ async def clear_failed_login_attempts(phone=None, user_id=None):
 
 async def get_active_user_block(user_id=None, phone=None):
     """
-    Получение активной блокировки по каноническому ключу или alias.
+    Получение активной блокировки по каноническому ключу uid:<user_id>.
+
+    Если user_id не передан, но передан телефон, user_id предварительно
+    вычисляется через build_block_primary_key(...), которая использует
+    прямой DB-вызов, а не endpoint.
     """
     global blocked_users, blocked_user_lock
 
@@ -4885,14 +4970,15 @@ async def get_active_user_block(user_id=None, phone=None):
     now = datetime.now()
     lookup_keys = []
 
-    primary_key = build_block_primary_key(user_id=user_id, phone=phone)
+    primary_key = await build_block_primary_key(user_id=user_id, phone=phone)
     if primary_key:
         lookup_keys.append(primary_key)
 
     if user_id is not None:
-        lookup_keys.append(f"uid:{int(user_id)}")
-    if phone:
-        lookup_keys.append(f"phone:{phone}")
+        try:
+            lookup_keys.append(f"uid:{int(user_id)}")
+        except Exception:
+            pass
 
     if verbose_mode:
         print_status(
@@ -4925,19 +5011,6 @@ async def get_active_user_block(user_id=None, phone=None):
 
             if not item:
                 continue
-
-            if isinstance(item, dict) and "__alias__" in item:
-                alias_target = item["__alias__"]
-                if verbose_mode:
-                    print_status(
-                        "INFO",
-                        "get_active_user_block: найден alias",
-                        data_lines=[
-                            f"alias_key={key!r}",
-                            f"alias_target={alias_target!r}"
-                        ]
-                    )
-                item = blocked_users.get(alias_target)
 
             if not isinstance(item, dict):
                 if verbose_mode:
@@ -6754,9 +6827,9 @@ async def get_user_by_phone(request):
     Название: get_user_by_phone
     Назначение: Получение информации о пользователе по номеру телефона
     Описание:
-        Выполняет предварительную проверку блокировки пользователя по нормализованному
-        номеру телефона ДО обращения к БД.
-        Эндпоинт должен блокироваться по правилам блокировки пользователя.
+        Выполняет предварительную проверку блокировки пользователя по каноническому
+        ключу uid:<user_id>. Если в запросе известен только телефон, user_id
+        вычисляется через DB-функцию внутри механизма проверки блокировки.
     """
     endpoint = '/user/by-phone'
 
