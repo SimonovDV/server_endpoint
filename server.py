@@ -6605,7 +6605,7 @@ async def get_user_update(request):
             event_type="blocked_db_request_denied",
             level="WARNING",
             user_id=user_id,
-            normalized_phone=normalized_phone,
+            normalized_phone=normalized_phone or active_block.get("normalized_phone"),
             endpoint=endpoint,
             reason=active_block.get("reason"),
             result="denied_non_password_update"
@@ -6622,11 +6622,7 @@ async def get_user_update(request):
 
     if not password_present:
         return web.json_response(
-            {
-                "status": "error",
-                "code": 400,
-                "message": "Поле password обязательно"
-            },
+            {"status": "error", "code": 400, "message": "Поле password обязательно"},
             status=200
         )
 
@@ -6641,12 +6637,16 @@ async def get_user_update(request):
             {
                 "status": "error",
                 "code": 3,
-                "message": "Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку."
+                "message": "Внутренняя ошибка сервера при обновлении данных пользователя. Обратитесь в поддержку."
             },
             status=200
         )
 
     is_success = bool(result)
+
+    unblock_phone = normalized_phone
+    if not unblock_phone and active_block:
+        unblock_phone = active_block.get("normalized_phone")
 
     if is_success and password_present:
         if active_block:
@@ -6654,13 +6654,14 @@ async def get_user_update(request):
                 event_type="blocked_user_password_changed",
                 level="INFO",
                 user_id=user_id,
-                normalized_phone=normalized_phone,
+                normalized_phone=unblock_phone,
                 endpoint=endpoint,
                 reason="password_changed_while_blocked",
                 result="unblocked"
             )
 
-        await clear_active_user_block(user_id=user_id, phone=normalized_phone)
+        await remove_user_block(user_id=user_id, phone=unblock_phone)
+        await clear_failed_login_attempts(phone=unblock_phone, user_id=user_id)
 
     if is_success:
         return web.json_response(
