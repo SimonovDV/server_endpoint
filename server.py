@@ -72,11 +72,11 @@ from collections import deque
 
 # --- Глобальные переменные и конфигурация ---
 SERVER_INFO = {
-    "server_name": "server_endpoint",
-    "developer_name": "SimonovDV",
-    "version_release_date": "2026-07-15",
-    "version": "1.0.0",
-    "owner_name": "SimonovDV"
+    "server_name": "Защищенный сервер обмена данными",
+    "developer_name": "Симонов Д.В.",
+    "version_release_date": "15.07.2026",
+    "version": "2",
+    "owner_name": "ООО Ломбард Драгоценности Урала"
 }
 
 # Глобальный словарь для хранения запросов
