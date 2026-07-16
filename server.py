@@ -7163,11 +7163,11 @@ async def get_setpayment(request: web.Request) -> web.Response:
         request.authenticated_token = token
         if verbose_mode:
             print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
-        
+
         # Получаем тело запроса как строку (без парсинга в JSON объект)
         try:
             raw_body = await request.read()
-            # Проверяем, что тело запроса не пустое
+
             if not raw_body:
                 response_data = {
                     "status": "error",
@@ -7176,18 +7176,15 @@ async def get_setpayment(request: web.Request) -> web.Response:
                 response = web.json_response(response_data, status=200)
                 await add_server_signature_to_response(response, token)
                 return response
-                
-            # Декодируем в UTF-8
+
             json_str = raw_body.decode('utf-8')
-            
+
             if verbose_mode:
                 print_status("INFO", f"Получены данные для обработки платежей")
                 print(f"  Длина JSON строки: {len(json_str)} символов")
                 print(f"  Данные (первые 500 символов): {json_str[:500]}..." if len(json_str) > 500 else f"  Данные: {json_str}")
-            
-            # Пытаемся проверить, что это валидный JSON (но не парсим)
+
             try:
-                # Только проверяем синтаксис, но не преобразуем в объект
                 json.loads(json_str)
             except json.JSONDecodeError as e:
                 response_data = {
@@ -7197,15 +7194,16 @@ async def get_setpayment(request: web.Request) -> web.Response:
                 response = web.json_response(response_data, status=200)
                 await add_server_signature_to_response(response, token)
                 return response
-            
-        except UnicodeDecodeError as e:
+
+        except UnicodeDecodeError:
             response_data = {
-                "status": "error", 
+                "status": "error",
                 "message": "Ошибка декодирования UTF-8"
             }
             response = web.json_response(response_data, status=200)
             await add_server_signature_to_response(response, token)
             return response
+
         except Exception as e:
             response_data = {
                 "status": "error",
@@ -7214,32 +7212,27 @@ async def get_setpayment(request: web.Request) -> web.Response:
             response = web.json_response(response_data, status=200)
             await add_server_signature_to_response(response, token)
             return response
-        
-        # ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЛЬЗОВАТЕЛЯ (если можем извлечь user_id из JSON)
+
+        # ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЛЬЗОВАТЕЛЯ (без проверки блокировки)
         try:
-            # Пытаемся извлечь user_id для проверки (если есть в JSON)
-            data_obj = json.loads(json_str)  # Парсим только для проверки пользователя
+            data_obj = json.loads(json_str)
             user_id = data_obj.get('user_id')
             if user_id:
-                blocked_response = await ensure_user_request_not_blocked(user_id=user_id, endpoint=request.path)
-                if blocked_response:
-                    return blocked_response
                 user_exists = await db_userid(user_id)
                 if not user_exists:
                     raise Exception(f"Пользователь с ID {user_id} не найден")
         except Exception as e:
             if "не найден" in str(e):
-                raise  # Перебрасываем только ошибку "не найден"
+                raise
             # Игнорируем другие ошибки при парсинге для проверки пользователя
-        
+
         if verbose_mode:
             print_status("INFO", f"Передача данных в хранимую процедуру")
-        
+
         # Обрабатываем платежи через хранимую процедуру - передаем JSON строку как есть
         result = await db_setpayment(json_str)
-        
+
         if result:
-            # Успешная обработка
             response_data = {
                 "status": "success",
                 "message": "Платежи успешно обработаны"
@@ -7248,22 +7241,20 @@ async def get_setpayment(request: web.Request) -> web.Response:
             if verbose_mode:
                 print_status("OK", f"Платежи успешно обработаны")
         else:
-            # Ошибка обработки
             response_data = {
-                "status": "error", 
+                "status": "error",
                 "message": "Ошибка обработки платежей"
             }
             response = web.json_response(response_data, status=200)
             if verbose_mode:
                 print_status("ERROR", f"Ошибка обработки платежей")
-        
-        # ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
+
         await add_server_signature_to_response(response, token)
         if verbose_mode:
             print_status("OK", f"Добавлена серверная подписи к ответу")
-        
+
         return response
-        
+
     except Exception as e:
         if "не найден" in str(e):
             response_data = {
@@ -7281,16 +7272,14 @@ async def get_setpayment(request: web.Request) -> web.Response:
                 "message": f"Ошибка при обработке платежей: {str(e)}"
             }
             response = web.json_response(response_data, status=200)
-        
-        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
+
         auth_header = request.headers.get("Token", "")
         token_for_signature = "unexpected_error"
         if auth_header.startswith("Bearer "):
             token_for_signature = auth_header[7:]
         await add_server_signature_to_response(response, token_for_signature)
-        
-        return response
 
+        return response
 
 async def get_login(request):
     request_id = str(uuid.uuid4())
