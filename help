@@ -1514,17 +1514,21 @@ body {
     <div class="container">
         <!-- Боковая навигация -->
         <nav class="sidebar">
-    <div class="sidebar-header">
-        <div class="christmas-tree">
-            <svg class="tree-outline" viewBox="0 0 30 35">
-                <path class="tree-line" d="M15,2 L20,10 L18,10 L22,16 L20,16 L25,25 L20,25 L15,33 L10,25 L5,25 L10,16 L8,16 L12,10 L10,10 L15,2 Z"/>
-            </svg>
-        </div>
-        <div>
-            <h1>Защищенный сервер обмена данными</h1>
-            <div class="version">Версия 1.0.0</div>
-        </div>
-    </div>
+            <div class="sidebar-header">
+                <div class="christmas-tree">
+                    <svg class="tree-outline" viewBox="0 0 30 35">
+                        <path class="tree-line" d="M15,2 L20,10 L18,10 L22,16 L20,16 L25,25 L20,25 L15,33 L10,25 L5,25 L10,16 L8,16 L12,10 L10,10 L15,2 Z"/>
+                    </svg>
+                </div>
+                <div>
+                    <h1 id="sidebar-server-name">Защищенный сервер обмена данными</h1>
+                    <div class="version" id="sidebar-server-version">Версия 1.0.0</div>
+                    <div class="version" id="sidebar-developer-name">Разработчик: —</div>
+                    <div class="version" id="sidebar-owner-name">Владелец: —</div>
+                    <div class="version" id="sidebar-release-date">Дата версии: —</div>
+                </div>
+            </div>
+
 
             <div class="nav-section">
                 <h3>Основное</h3>
@@ -5303,6 +5307,49 @@ Signature: base64-encoded-rsa-signature
             await loadStatisticsData(cacheBuster);
         }
 
+        // Загрузка информации о сервере для sidebar-header
+        async function loadServerInfo(cacheBuster = '') {
+            const nameElement = document.getElementById('sidebar-server-name');
+            const versionElement = document.getElementById('sidebar-server-version');
+            const developerElement = document.getElementById('sidebar-developer-name');
+            const ownerElement = document.getElementById('sidebar-owner-name');
+            const releaseDateElement = document.getElementById('sidebar-release-date');
+
+            try {
+                const url = `${getApiUrl('/health/info')}${cacheBuster ? `?${cacheBuster}` : ''}`;
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache'
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                if (nameElement) {
+                    nameElement.textContent = data.server_name || 'Защищенный сервер обмена данными';
+                }
+                if (versionElement) {
+                    versionElement.textContent = `Версия ${data.version || '—'}`;
+                }
+                if (developerElement) {
+                    developerElement.textContent = `Разработчик: ${data.developer_name || '—'}`;
+                }
+                if (ownerElement) {
+                    ownerElement.textContent = `Владелец: ${data.owner_name || '—'}`;
+                }
+                if (releaseDateElement) {
+                    releaseDateElement.textContent = `Дата версии: ${data.version_release_date || '—'}`;
+                }
+            } catch (error) {
+                console.error('Ошибка загрузки информации о сервере:', error);
+            }
+        }        
 
         // Загрузка общего состояния сервера
         async function loadServerStatus(cacheBuster = '') {
