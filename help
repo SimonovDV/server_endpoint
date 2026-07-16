@@ -1523,9 +1523,11 @@ body {
                 <div>
                     <h1 id="sidebar-server-name">Защищенный сервер обмена данными</h1>
                     <div class="version" id="sidebar-server-version">Версия 1.0.0</div>
-                    <div class="version" id="sidebar-developer-name">Разработчик: —</div>
-                    <div class="version" id="sidebar-owner-name">Владелец: —</div>
-                    <div class="version" id="sidebar-release-date">Дата версии: —</div>
+                    <div class="version-modal">
+                        <div class="version" id="sidebar-developer-name">Разработчик: —</div>
+                        <div class="version" id="sidebar-owner-name">Владелец: —</div>
+                        <div class="version" id="sidebar-release-date">Дата версии: —</div>
+                    </div>
                 </div>
             </div>
 
