@@ -1529,7 +1529,6 @@ body {
                 </div>
             </div>
 
-
             <div class="nav-section">
                 <h3>Основное</h3>
                 <ul class="nav-links">
@@ -5307,49 +5306,6 @@ Signature: base64-encoded-rsa-signature
             await loadStatisticsData(cacheBuster);
         }
 
-        // Загрузка информации о сервере для sidebar-header
-        async function loadServerInfo(cacheBuster = '') {
-            const nameElement = document.getElementById('sidebar-server-name');
-            const versionElement = document.getElementById('sidebar-server-version');
-            const developerElement = document.getElementById('sidebar-developer-name');
-            const ownerElement = document.getElementById('sidebar-owner-name');
-            const releaseDateElement = document.getElementById('sidebar-release-date');
-
-            try {
-                const url = `${getApiUrl('/health/info')}${cacheBuster ? `?${cacheBuster}` : ''}`;
-                const response = await fetch(url, {
-                    method: 'GET',
-                    headers: {
-                        'Cache-Control': 'no-cache',
-                        'Pragma': 'no-cache'
-                    }
-                });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-
-                const data = await response.json();
-
-                if (nameElement) {
-                    nameElement.textContent = data.server_name || 'Защищенный сервер обмена данными';
-                }
-                if (versionElement) {
-                    versionElement.textContent = `Версия ${data.version || '—'}`;
-                }
-                if (developerElement) {
-                    developerElement.textContent = `Разработчик: ${data.developer_name || '—'}`;
-                }
-                if (ownerElement) {
-                    ownerElement.textContent = `Владелец: ${data.owner_name || '—'}`;
-                }
-                if (releaseDateElement) {
-                    releaseDateElement.textContent = `Дата версии: ${data.version_release_date || '—'}`;
-                }
-            } catch (error) {
-                console.error('Ошибка загрузки информации о сервере:', error);
-            }
-        }        
 
         // Загрузка общего состояния сервера
         async function loadServerStatus(cacheBuster = '') {
