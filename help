@@ -19,6 +19,8 @@
     box-sizing: border-box;
 }
 
+
+
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     line-height: 1.6;
@@ -56,6 +58,46 @@ body {
 .sidebar-header .version {
     color: #bdc3c7;
     font-size: 12px;
+}
+
+/* Подсказка с данными версии */
+#sidebar-server-version {
+    cursor: pointer;
+    user-select: none;
+}
+
+#sidebar-server-version:hover {
+    color: #ecf0f1;
+}
+
+.version-modal {
+    position: fixed;
+    z-index: 9999;
+    min-width: 220px;
+    max-width: 280px;
+    background: rgba(44, 62, 80, 0.96);
+    color: #ecf0f1;
+    border: 1px solid #34495e;
+    border-radius: 6px;
+    padding: 10px 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    display: none;
+    pointer-events: none;
+}
+
+.version-modal.show {
+    display: block;
+}
+
+.version-modal .version {
+    color: #ecf0f1;
+    font-size: 12px;
+    line-height: 1.45;
+    margin: 0 0 6px 0;
+}
+
+.version-modal .version:last-child {
+    margin-bottom: 0;
 }
 
 .nav-section {
@@ -1517,19 +1559,38 @@ body {
             <div class="sidebar-header">
                 <div class="christmas-tree">
                     <svg class="tree-outline" viewBox="0 0 30 35">
-                        <path class="tree-line" d="M15,2 L20,10 L18,10 L22,16 L20,16 L25,25 L20,25 L15,33 L10,25 L5,25 L10,16 L8,16 L12,10 L10,10 L15,2 Z"/>
+                        <path class="tree-line" d="M15,2 L20,10 L18,10 L22,16 L20,16 L25,25 L20,25 L15,33 L10,25 L5,25 L10,16 L8,16 L12,10 L10,10 L15,2 Z"></path>
                     </svg>
                 </div>
+
                 <div>
                     <h1 id="sidebar-server-name">Защищенный сервер обмена данными</h1>
-                    <div class="version" id="sidebar-server-version">Версия 1.0.0</div>
-                    <div class="version-modal">
+
+                    <div
+                        class="version"
+                        id="sidebar-server-version"
+                        role="button"
+                        tabindex="0"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                        aria-describedby="sidebar-version-modal"
+                    >
+                        Версия 1.0.0
+                    </div>
+
+                    <div
+                        class="version-modal"
+                        id="sidebar-version-modal"
+                        role="tooltip"
+                        aria-hidden="true"
+                    >
                         <div class="version" id="sidebar-developer-name">Разработчик: —</div>
                         <div class="version" id="sidebar-owner-name">Владелец: —</div>
                         <div class="version" id="sidebar-release-date">Дата версии: —</div>
                     </div>
                 </div>
             </div>
+
 
             <div class="nav-section">
                 <h3>Основное</h3>
@@ -5229,6 +5290,228 @@ Signature: base64-encoded-rsa-signature
 </div>
 
 <script>
+let sidebarVersionHideTimer = null;
+let sidebarTriggerHovered = false;
+let sidebarModalHovered = false;
+
+function formatSidebarVersionDate(value) {
+    if (!value) return '—';
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return value;
+    }
+
+    return date.toLocaleDateString('ru-RU');
+}
+
+async function loadSidebarServerInfo() {
+    const serverNameEl = document.getElementById('sidebar-server-name');
+    const serverVersionEl = document.getElementById('sidebar-server-version');
+    const developerEl = document.getElementById('sidebar-developer-name');
+    const ownerEl = document.getElementById('sidebar-owner-name');
+    const releaseDateEl = document.getElementById('sidebar-release-date');
+
+    if (!serverNameEl || !serverVersionEl || !developerEl || !ownerEl || !releaseDateEl) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/health/info', {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json'
+            },
+            cache: 'no-store'
+        });
+
+        if (!response.ok) {
+            throw new Error('HTTP ' + response.status);
+        }
+
+        const data = await response.json();
+
+        serverNameEl.textContent = data.server_name || 'Защищенный сервер обмена данными';
+        serverVersionEl.textContent = 'Версия ' + (data.version || '—');
+        developerEl.textContent = 'Разработчик: ' + (data.developer_name || '—');
+        ownerEl.textContent = 'Владелец: ' + (data.owner_name || '—');
+        releaseDateEl.textContent = 'Дата версии: ' + formatSidebarVersionDate(data.version_release_date);
+    } catch (error) {
+        console.error('Ошибка загрузки /health/info:', error);
+    }
+}
+
+function clearSidebarVersionHideTimer() {
+    if (sidebarVersionHideTimer) {
+        clearTimeout(sidebarVersionHideTimer);
+        sidebarVersionHideTimer = null;
+    }
+}
+
+function hideSidebarVersionModal() {
+    const trigger = document.getElementById('sidebar-server-version');
+    const modal = document.getElementById('sidebar-version-modal');
+
+    if (!trigger || !modal) {
+        return;
+    }
+
+    clearSidebarVersionHideTimer();
+    modal.classList.remove('show');
+    modal.setAttribute('aria-hidden', 'true');
+    trigger.setAttribute('aria-expanded', 'false');
+}
+
+function scheduleSidebarVersionModalHide(delay = 120) {
+    clearSidebarVersionHideTimer();
+
+    sidebarVersionHideTimer = setTimeout(function () {
+        if (!sidebarTriggerHovered && !sidebarModalHovered) {
+            hideSidebarVersionModal();
+        }
+    }, delay);
+}
+
+function positionSidebarVersionModal(x, y) {
+    const modal = document.getElementById('sidebar-version-modal');
+    if (!modal) {
+        return;
+    }
+
+    modal.style.left = '0px';
+    modal.style.top = '0px';
+    modal.classList.add('show');
+
+    const rect = modal.getBoundingClientRect();
+    const offset = 12;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    let left = x + offset;
+    let top = y + offset;
+
+    if (left + rect.width > viewportWidth - 8) {
+        left = x - rect.width - offset;
+    }
+
+    if (left < 8) {
+        left = 8;
+    }
+
+    if (top + rect.height > viewportHeight - 8) {
+        top = y - rect.height - offset;
+    }
+
+    if (top < 8) {
+        top = 8;
+    }
+
+    modal.style.left = left + 'px';
+    modal.style.top = top + 'px';
+}
+
+function showSidebarVersionModal(event) {
+    const trigger = document.getElementById('sidebar-server-version');
+    const modal = document.getElementById('sidebar-version-modal');
+
+    if (!trigger || !modal) {
+        return;
+    }
+
+    clearSidebarVersionHideTimer();
+
+    let x;
+    let y;
+
+    if (event && typeof event.clientX === 'number' && typeof event.clientY === 'number') {
+        x = event.clientX;
+        y = event.clientY;
+    } else {
+        const triggerRect = trigger.getBoundingClientRect();
+        x = triggerRect.right;
+        y = triggerRect.bottom;
+    }
+
+    positionSidebarVersionModal(x, y);
+    modal.setAttribute('aria-hidden', 'false');
+    trigger.setAttribute('aria-expanded', 'true');
+}
+
+function initSidebarVersionModal() {
+    const trigger = document.getElementById('sidebar-server-version');
+    const modal = document.getElementById('sidebar-version-modal');
+
+    if (!trigger || !modal) {
+        return;
+    }
+
+    trigger.addEventListener('mouseenter', function (event) {
+        sidebarTriggerHovered = true;
+        showSidebarVersionModal(event);
+    });
+
+    trigger.addEventListener('mousemove', function (event) {
+        if (sidebarTriggerHovered) {
+            showSidebarVersionModal(event);
+        }
+    });
+
+    trigger.addEventListener('mouseleave', function () {
+        sidebarTriggerHovered = false;
+        scheduleSidebarVersionModalHide();
+    });
+
+    trigger.addEventListener('focus', function () {
+        showSidebarVersionModal();
+    });
+
+    trigger.addEventListener('blur', function () {
+        scheduleSidebarVersionModalHide();
+    });
+
+    trigger.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') {
+            sidebarTriggerHovered = false;
+            sidebarModalHovered = false;
+            hideSidebarVersionModal();
+        }
+    });
+
+    modal.addEventListener('mouseenter', function () {
+        sidebarModalHovered = true;
+        clearSidebarVersionHideTimer();
+    });
+
+    modal.addEventListener('mouseleave', function () {
+        sidebarModalHovered = false;
+        scheduleSidebarVersionModalHide();
+    });
+
+    document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') {
+            sidebarTriggerHovered = false;
+            sidebarModalHovered = false;
+            hideSidebarVersionModal();
+        }
+    });
+
+    window.addEventListener('scroll', function () {
+        sidebarTriggerHovered = false;
+        sidebarModalHovered = false;
+        hideSidebarVersionModal();
+    }, { passive: true });
+
+    window.addEventListener('resize', function () {
+        sidebarTriggerHovered = false;
+        sidebarModalHovered = false;
+        hideSidebarVersionModal();
+    });
+}
+
+document.addEventListener('DOMContentLoaded', async function () {
+    await loadSidebarServerInfo();
+    initSidebarVersionModal();
+});
 
         // Инициализация событий
         document.addEventListener('DOMContentLoaded', function() {
