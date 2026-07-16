@@ -421,16 +421,50 @@ class SecureDataExchangeTester:
 
     def test_document_load(self):
         self.print_test_title("ТЕСТ ЗАГРУЗКИ ДОКУМЕНТА /document/load")
-        file_path = self.input_with_default("Введите путь к файлу", os.path.join(self.files_dir, "test.pdf"))
 
-        if not os.path.exists(file_path):
-            print(f"Ошибка: файл не найден: {file_path}")
+        if not os.path.isdir(self.files_dir):
+            print(f"Ошибка: каталог с файлами не найден: {self.files_dir}")
             self.wait_for_key()
             return
 
+        available_files = sorted(
+            [
+                os.path.join(root, file_name)
+                for root, _, files in os.walk(self.files_dir)
+                for file_name in files
+            ]
+        )
+
+        if not available_files:
+            print(f"Ошибка: в каталоге {self.files_dir} нет файлов для загрузки")
+            self.wait_for_key()
+            return
+
+        print("Доступные файлы:\\n")
+        for index, path in enumerate(available_files, start=1):
+            relative_path = os.path.relpath(path, self.files_dir)
+            print(f" {index}. {relative_path}")
+
+        choice = self.input_with_default("Выберите номер файла", "1")
+        try:
+            file_index = int(choice)
+        except ValueError:
+            print("Ошибка: требуется ввести номер файла.")
+            self.wait_for_key()
+            return
+
+        if not 1 <= file_index <= len(available_files):
+            print("Ошибка: выбран неизвестный номер файла.")
+            self.wait_for_key()
+            return
+
+        file_path = available_files[file_index - 1]
+        selected_name = os.path.basename(file_path)
+        default_type = os.path.splitext(selected_name)[1].lstrip('.').lower() or 'bin'
+
         user_id = self.input_with_default("Введите ID пользователя", "1")
-        description = self.input_with_default("Введите описание документа", "Тестовый документ")
-        doc_type = self.input_with_default("Введите тип документа", "pdf")
+        description = self.input_with_default("Введите описание документа", f"Файл {selected_name}")
+        doc_type = self.input_with_default("Введите тип документа", default_type)
 
         with open(file_path, 'rb') as f:
             encoded_data = base64.b64encode(f.read()).decode('utf-8')
@@ -439,7 +473,7 @@ class SecureDataExchangeTester:
             "user_id": user_id,
             "description": description,
             "type": doc_type,
-            "name": os.path.basename(file_path),
+            "name": selected_name,
             "data": encoded_data
         }
 
