@@ -19,22 +19,18 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 class SecureDataExchangeTester:
     """
-    Основной класс тестировщика API безопасного обмена данными.
+    Тестер API безопасного обмена данными.
 
-    Тестер предназначен для интерактивной проверки endpoint'ов сервера,
-    сценариев авторизации, загрузки документов, платежных операций,
-    а также сценариев механизма блокировки пользователей в соответствии с ТЗ.
+    Сохранено:
+    - загрузка конфигурации из JSON через аргумент командной строки;
+    - отображение актуально подключенного сервера;
+    - интерактивное изменение настроек подключения;
+    - работа с ключами и генерация подписи.
 
-    Принципы интерфейса:
-    - все меню числовые;
-    - 0 всегда означает возврат или выход;
-    - логические ответы вводятся только как 0 или 1;
-    - во всех запросах предусмотрены значения по умолчанию;
-    - режим вывода выбирается один раз при запуске.
+    Тесты в главном меню расположены строго в порядке со скриншота.
     """
 
     def __init__(self, config_path=None):
-        """Инициализация тестера и загрузка настроек подключения."""
         self.default_server_ip = "192.168.0.19"
         self.default_server_port = 8000
         self.default_scheme = "http"
@@ -64,7 +60,6 @@ class SecureDataExchangeTester:
         atexit.register(self.cleanup_temp_keys)
 
     def setup_keys(self):
-        """Настройка временной директории ключей и подготовка публичного ключа сервера."""
         self.cleanup_old_temp_keys()
         self.temp_keys_dir = tempfile.mkdtemp(prefix="api_tester_keys_")
         self.ensure_public_key()
@@ -72,7 +67,6 @@ class SecureDataExchangeTester:
         self.keys_dir = self.temp_keys_dir
 
     def cleanup_old_temp_keys(self):
-        """Удаление старых временных каталогов с ключами тестера."""
         temp_dir = tempfile.gettempdir()
         for item in os.listdir(temp_dir):
             item_path = os.path.join(temp_dir, item)
@@ -83,28 +77,32 @@ class SecureDataExchangeTester:
                     pass
 
     def copy_keys_to_temp(self):
-        """Копирование PEM-файлов во временную директорию тестера."""
         source_keys_dir = os.path.join(self.base_dir, "keys")
         if not os.path.exists(source_keys_dir):
             return False
+
         copied = 0
         for file_name in os.listdir(source_keys_dir):
             if file_name.endswith('.pem'):
                 try:
-                    shutil.copy2(os.path.join(source_keys_dir, file_name), os.path.join(self.temp_keys_dir, file_name))
+                    shutil.copy2(
+                        os.path.join(source_keys_dir, file_name),
+                        os.path.join(self.temp_keys_dir, file_name)
+                    )
                     copied += 1
                 except Exception:
                     pass
         return copied > 0
 
     def ensure_public_key(self):
-        """Создание тестового публичного ключа сервера при его отсутствии."""
         public_key_path = os.path.join(self.base_dir, "keys", "public_server.pem")
         if os.path.exists(public_key_path):
             return
+
         os.makedirs(os.path.dirname(public_key_path), exist_ok=True)
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         public_key = private_key.public_key()
+
         with open(public_key_path, 'wb') as f:
             f.write(public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
@@ -112,7 +110,6 @@ class SecureDataExchangeTester:
             ))
 
     def cleanup_temp_keys(self):
-        """Очистка временной директории ключей при завершении работы тестера."""
         if self.temp_keys_dir and os.path.exists(self.temp_keys_dir):
             try:
                 shutil.rmtree(self.temp_keys_dir)
@@ -120,43 +117,44 @@ class SecureDataExchangeTester:
                 pass
 
     def rebuild_server_url(self):
-        """Пересборка базового URL сервера по текущим параметрам подключения."""
         self.SERVER_URL = f"{self.server_scheme}://{self.server_ip}:{self.server_port}"
 
     def load_settings_from_json(self, config_path):
-        """Загрузка настроек подключения из JSON-файла сервера, если он задан."""
+        """
+        Загрузка настроек из JSON-файла, как это было сделано ранее:
+        tester.py <path_to_config.json>
+        """
         if not config_path or not os.path.exists(config_path):
             return
+
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+
             self.server_ip = str(data.get('server_ip') or data.get('ip') or data.get('host') or self.server_ip)
             self.server_port = int(data.get('server_port') or data.get('port') or self.server_port)
             self.server_scheme = str(data.get('scheme') or data.get('protocol') or self.server_scheme)
             self.TOKEN = str(data.get('token') or self.TOKEN)
             self.request_timeout = int(data.get('request_timeout') or data.get('timeout') or self.request_timeout)
+
+            print(f"Загружена конфигурация из файла: {config_path}")
         except Exception as e:
             print(f"Предупреждение: не удалось загрузить настройки из JSON: {e}")
 
     def clear_screen(self):
-        """Очистка экрана консоли."""
         os.system('cls' if os.name == 'nt' else 'clear')
 
     def wait_for_key(self, message="Нажмите Enter для продолжения..."):
-        """Ожидание подтверждения пользователя."""
         input(f"\n{message}")
 
     def get_current_date(self):
-        """Получение текущей даты в формате DD.MM.YYYY."""
         return datetime.now().strftime("%d.%m.%Y")
 
     def input_with_default(self, prompt, default_value):
-        """Ввод значения с подстановкой значения по умолчанию."""
         value = input(f"{prompt} [по умолчанию: {default_value}]: ").strip()
         return value if value else default_value
 
     def input_int_with_default(self, prompt, default_value):
-        """Ввод целого числа с проверкой и значением по умолчанию."""
         while True:
             value = self.input_with_default(prompt, str(default_value))
             try:
@@ -165,7 +163,6 @@ class SecureDataExchangeTester:
                 print("Ошибка: требуется целое число.")
 
     def input_bool01(self, prompt, default_value=0):
-        """Ввод логического значения в формате 0/1."""
         while True:
             value = self.input_with_default(prompt, str(default_value))
             if value in ('0', '1'):
@@ -173,7 +170,6 @@ class SecureDataExchangeTester:
             print("Ошибка: допустимы только 0 или 1.")
 
     def print_current_settings(self):
-        """Вывод текущих настроек подключения тестера."""
         print("\nТекущие настройки:")
         print("-" * 60)
         print(f"Схема: {self.server_scheme}")
@@ -186,68 +182,75 @@ class SecureDataExchangeTester:
         print("-" * 60)
 
     def configure_connection_interactive(self):
-        """Интерактивное изменение параметров подключения, каждое поле задается отдельно."""
         self.clear_screen()
         print("=" * 80)
         print("ИЗМЕНЕНИЕ НАСТРОЕК ПОДКЛЮЧЕНИЯ")
         print("=" * 80)
         self.print_current_settings()
+
         self.server_scheme = self.input_with_default("Введите схему подключения (http/https)", self.server_scheme)
         self.server_ip = self.input_with_default("Введите IP адрес сервера", self.server_ip)
         self.server_port = self.input_int_with_default("Введите порт сервера", self.server_port)
         self.TOKEN = self.input_with_default("Введите токен", self.TOKEN)
         self.request_timeout = self.input_int_with_default("Введите таймаут запроса в секундах", self.request_timeout)
+
         self.rebuild_server_url()
+
         print("\nНастройки успешно обновлены.")
-        self.print_current_settings()
+        print(f"Актуально подключенный сервер: {self.SERVER_URL}")
         self.wait_for_key()
 
     def generate_signature(self):
-        """Генерация цифровой подписи для защищенных запросов."""
         try:
             public_key_path = os.path.join(self.keys_dir, "public_server.pem")
             if not os.path.exists(public_key_path):
                 print("Ошибка: файл публичного ключа не найден.")
                 return None
+
             with open(public_key_path, 'rb') as f:
                 server_public_key = serialization.load_pem_public_key(f.read())
+
             expiry_time = int(time.time()) + 300
             signature_data = f'{self.TOKEN}.{expiry_time}'
             encrypted = server_public_key.encrypt(signature_data.encode('utf-8'), padding.PKCS1v15())
             return base64.b64encode(encrypted).decode('utf-8')
+
         except Exception as e:
             print(f"Ошибка генерации подписи: {e}")
             return None
 
     def print_request_info(self, url, headers, data):
-        """Вывод информации о запросе в полном режиме."""
         if self.output_mode == 0:
             return
+
         print("\n" + "=" * 80)
         print("ЗАПРОС")
         print("=" * 80)
         print(f"URL: {url}")
+
         print("\nЗаголовки:")
         for key, value in headers.items():
             if key == 'Signature' and len(value) > 100:
                 print(f"  {key}: {value[:50]}...{value[-50:]}")
             else:
                 print(f"  {key}: {value}")
+
         print("\nТело запроса:")
         print("-" * 40)
         print(json.dumps(data, ensure_ascii=False, indent=2) if data else "{}")
         print("=" * 80)
 
     def print_response_info(self, response):
-        """Вывод ответа сервера в кратком или полном режиме."""
         print("\n" + "=" * 80)
         print("ОТВЕТ СЕРВЕРА")
         print("=" * 80)
         print(f"Статус код: {response.status_code}")
+
         if self.output_mode == 1:
             print("Заголовки ответа:")
             for key, value in response.headers.items():
                 print(f"  {key}: {value}")
+
         print("\nТело ответа:")
         print("-" * 40)
         try:
@@ -257,34 +260,42 @@ class SecureDataExchangeTester:
         print("=" * 80)
 
     def send_request(self, endpoint, data, use_signature=True, method='POST'):
-        """Отправка HTTP-запроса к endpoint сервера."""
-        headers = {"Content-Type": "application/json", "Token": f"Bearer {self.TOKEN}"}
+        headers = {
+            "Content-Type": "application/json",
+            "Token": f"Bearer {self.TOKEN}"
+        }
+
         if use_signature:
             signature = self.generate_signature()
             if not signature:
                 return None
             headers["Signature"] = signature
+
         url = f"{self.SERVER_URL}{endpoint}"
         self.print_request_info(url, headers, data)
+
         try:
             if method.upper() == 'GET':
                 response = requests.get(url, headers=headers, timeout=self.request_timeout)
             else:
                 response = requests.post(url, headers=headers, json=data, timeout=self.request_timeout)
+
             self.print_response_info(response)
+
             try:
                 return response.json()
             except Exception:
                 return {"status_code": response.status_code, "text": response.text}
+
         except requests.exceptions.RequestException as e:
             print("\nОШИБКА ЗАПРОСА:", e)
             return None
 
     def ask_output_mode(self):
-        """Единоразовый выбор режима вывода при запуске тестера."""
         print("\nВыберите режим вывода информации:")
         print("0. Краткий")
         print("1. Полный")
+
         while True:
             value = input("Выберите режим (0 или 1) [по умолчанию: 0]: ").strip() or '0'
             if value in ('0', '1'):
@@ -292,7 +303,6 @@ class SecureDataExchangeTester:
             print("Ошибка: допустимы только 0 или 1.")
 
     def print_test_title(self, title):
-        """Отрисовка заголовка теста с текущими настройками подключения."""
         self.clear_screen()
         print("=" * 80)
         print(title)
@@ -300,300 +310,198 @@ class SecureDataExchangeTester:
         self.print_current_settings()
 
     def build_login_payload(self):
-        """Формирование JSON тела запроса для тестов авторизации."""
         phone = self.input_with_default("Введите номер телефона", "9991234567")
         password = self.input_with_default("Введите пароль", "123456")
         return {"phone": phone, "password": password}
 
-    def test_server_health(self):
-        """Проверка доступности сервера через маршрут health-check."""
-        self.print_test_title("ПРОВЕРКА ДОСТУПНОСТИ СЕРВЕРА")
-        self.send_request("/health", {}, use_signature=False, method='GET')
-        self.wait_for_key()
-
-    def test_login(self):
-        """Базовый тест авторизации пользователя через endpoint /user/login."""
-        self.print_test_title("ТЕСТ АВТОРИЗАЦИИ /user/login")
-        self.send_request("/user/login", self.build_login_payload(), use_signature=True)
-        self.wait_for_key()
-
     def test_user_by_phone(self):
-        """Тест поиска пользователя по номеру телефона через /user/by-phone."""
         self.print_test_title("ТЕСТ ПОИСКА ПОЛЬЗОВАТЕЛЯ /user/by-phone")
         phone = self.input_with_default("Введите номер телефона", "9991234567")
         self.send_request("/user/by-phone", {"phone": phone})
         self.wait_for_key()
 
     def test_user_update(self):
-        """Тест изменения данных пользователя через /user/update."""
-        self.print_test_title("ТЕСТ ИЗМЕНЕНИЯ ДАННЫХ /user/update")
+        self.print_test_title("ТЕСТ ОБНОВЛЕНИЯ ДАННЫХ /user/update")
         user_id = self.input_with_default("Введите ID пользователя", "1")
         email = self.input_with_default("Введите email", "user@example.com")
         password = self.input_with_default("Введите пароль", "123456")
-        self.send_request("/user/update", {"user_id": user_id, "email": email, "password": password})
+        payload = {
+            "user_id": user_id,
+            "email": email,
+            "password": password
+        }
+        self.send_request("/user/update", payload)
         self.wait_for_key()
 
     def test_user_mailing(self):
-        """Тест обновления согласия на рассылку через /user/mailing."""
-        self.print_test_title("ТЕСТ РАССЫЛКИ /user/mailing")
+        self.print_test_title("ТЕСТ EMAIL РАССЫЛКИ /user/mailing")
         user_id = self.input_with_default("Введите ID пользователя", "1")
         consent = self.input_bool01("Согласие на рассылку (0 - нет, 1 - да)", 1)
-        self.send_request("/user/mailing", {"user_id": user_id, "consent_to_mailing": bool(consent)})
+        payload = {
+            "user_id": user_id,
+            "consent_to_mailing": bool(consent)
+        }
+        self.send_request("/user/mailing", payload)
         self.wait_for_key()
 
     def test_ticket_list(self):
-        """Тест списка билетов через /ticket/list."""
-        self.print_test_title("ТЕСТ СПИСКА БИЛЕТОВ /ticket/list")
+        self.print_test_title("ТЕСТ ЗАЛОГОВЫХ БИЛЕТОВ /ticket/list")
         user_id = self.input_with_default("Введите ID пользователя", "1")
-        data = {"user_id": user_id}
+        payload = {"user_id": user_id}
+
         if self.input_bool01("Передавать статус билета? (0 - нет, 1 - да)", 0) == 1:
-            data["status"] = self.input_int_with_default("Введите статус", 1)
-        self.send_request("/ticket/list", data)
+            payload["status"] = self.input_with_default("Введите статус", "")
+
+        self.send_request("/ticket/list", payload)
         self.wait_for_key()
 
     def test_payment_set(self):
-        """Тест записи оплаты через /payment/set."""
         self.print_test_title("ТЕСТ ОПЛАТЫ /payment/set")
         transaction_id = self.input_with_default("Введите ID транзакции", "1001")
         user_id = self.input_with_default("Введите ID пользователя", "1")
         payment_date = self.input_with_default("Введите дату платежа ISO", "2026-07-12T12:00:00")
+
         items = []
         while True:
             ticket_id = self.input_with_default("ID залогового билета (ticket_id)", "1")
             amount = self.input_with_default("Сумма платежа", "100.00")
-            items.append({"ticket_id": ticket_id, "amount": amount})
+            items.append({
+                "ticket_id": ticket_id,
+                "amount": amount
+            })
             if self.input_bool01("Добавить еще одну запись? (0 - нет, 1 - да)", 0) == 0:
                 break
-        payload = {"transaction_id": transaction_id, "user_id": user_id, "payment_date": payment_date, "items": items}
+
+        payload = {
+            "transaction_id": transaction_id,
+            "user_id": user_id,
+            "payment_date": payment_date,
+            "items": items
+        }
+
         if self.input_bool01("Подтвердить отправку? (0 - нет, 1 - да)", 1) == 1:
             self.send_request("/payment/set", payload)
+
+        self.wait_for_key()
+
+    def test_payment_calculate_distribution(self):
+        self.print_test_title("ТЕСТ РАСЧЕТА РАСПРЕДЕЛЕНИЯ ПЛАТЕЖА /payment/calculate-distribution")
+        user_id = self.input_with_default("Введите ID пользователя", "1")
+        amount = self.input_with_default("Введите общую сумму платежа", "1000.00")
+
+        items = []
+        while True:
+            ticket_id = self.input_with_default("Номер залогового билета (ticket_id)", "1")
+            item_amount = self.input_with_default("Сумма платежа для элемента", "100.00")
+            items.append({
+                "id": ticket_id,
+                "amount": item_amount
+            })
+            if self.input_bool01("Добавить еще один элемент? (0 - нет, 1 - да)", 0) == 0:
+                break
+
+        request_data = {
+            "user_id": user_id,
+            "amount": amount,
+            "items": items
+        }
+
+        print("\nСформированный JSON запрос:")
+        print(json.dumps(request_data, ensure_ascii=False, indent=2))
+
+        if self.input_bool01("Подтвердить отправку? (0 - нет, 1 - да)", 1) == 1:
+            self.send_request("/payment/calculate-distribution", request_data)
+
+        self.wait_for_key()
+
+    def test_login(self):
+        self.print_test_title("ТЕСТ ВХОДА В СИСТЕМУ /user/login")
+        self.send_request("/user/login", self.build_login_payload(), use_signature=True)
         self.wait_for_key()
 
     def test_document_load(self):
-        """Тест загрузки документа через /document/load."""
         self.print_test_title("ТЕСТ ЗАГРУЗКИ ДОКУМЕНТА /document/load")
         file_path = self.input_with_default("Введите путь к файлу", os.path.join(self.files_dir, "test.pdf"))
+
         if not os.path.exists(file_path):
             print(f"Ошибка: файл не найден: {file_path}")
             self.wait_for_key()
             return
+
         user_id = self.input_with_default("Введите ID пользователя", "1")
         description = self.input_with_default("Введите описание документа", "Тестовый документ")
         doc_type = self.input_with_default("Введите тип документа", "pdf")
+
         with open(file_path, 'rb') as f:
             encoded_data = base64.b64encode(f.read()).decode('utf-8')
-        payload = {"user_id": user_id, "description": description, "type": doc_type, "name": os.path.basename(file_path), "data": encoded_data}
+
+        payload = {
+            "user_id": user_id,
+            "description": description,
+            "type": doc_type,
+            "name": os.path.basename(file_path),
+            "data": encoded_data
+        }
+
         self.send_request("/document/load", payload)
         self.wait_for_key()
 
     def test_document_signed(self):
-        """Тест подписания документа через /document/signed."""
-        self.print_test_title("ТЕСТ ПОДПИСАНИЯ ДОКУМЕНТА /document/signed")
+        self.print_test_title("ТЕСТ ПОДПИСИ ДОКУМЕНТА /document/signed")
         document_id = self.input_with_default("Введите ID документа", "1")
         is_signed = self.input_bool01("Документ подписан? (0 - нет, 1 - да)", 1)
-        self.send_request("/document/signed", {"document_id": document_id, "is_signed": bool(is_signed)})
+
+        payload = {
+            "document_id": document_id,
+            "is_signed": bool(is_signed)
+        }
+
+        self.send_request("/document/signed", payload)
         self.wait_for_key()
 
     def test_document_list(self):
-        """Тест списка документов пользователя через /document/list."""
         self.print_test_title("ТЕСТ СПИСКА ДОКУМЕНТОВ /document/list")
         user_id = self.input_with_default("Введите ID пользователя", "1")
         self.send_request("/document/list", {"user_id": user_id})
         self.wait_for_key()
 
-    def test_payment_calculate_distribution(self):
-        """Тест расчета распределения платежа через /payment/calculate-distribution."""
-        self.print_test_title("ТЕСТ РАСПРЕДЕЛЕНИЯ ПЛАТЕЖА /payment/calculate-distribution")
-        user_id = self.input_with_default("Введите ID пользователя", "1")
-        amount = self.input_with_default("Введите общую сумму платежа", "1000.00")
-        items = []
-        while True:
-            ticket_id = self.input_with_default("Номер залогового билета (ticket_id)", "1")
-            item_amount = self.input_with_default("Сумма платежа для элемента", "100.00")
-            items.append({"id": ticket_id, "amount": item_amount})
-            if self.input_bool01("Добавить еще один элемент? (0 - нет, 1 - да)", 0) == 0:
-                break
-        request_data = {"user_id": user_id, "amount": amount, "items": items}
-        print("\nСформированный JSON запрос:")
-        print(json.dumps(request_data, ensure_ascii=False, indent=2))
-        if self.input_bool01("Подтвердить отправку? (0 - нет, 1 - да)", 1) == 1:
-            self.send_request("/payment/calculate-distribution", request_data)
-        self.wait_for_key()
-
-    def test_login_invalid_credentials(self):
-        """Тест сценария неуспешной авторизации для проверки ответа invalid_credentials."""
-        self.print_test_title("ТЕСТ НЕВЕРНЫХ УЧЕТНЫХ ДАННЫХ /user/login")
-        phone = self.input_with_default("Введите номер телефона", "9991234567")
-        password = self.input_with_default("Введите заведомо неверный пароль", "wrong_password")
-        self.send_request("/user/login", {"phone": phone, "password": password})
-        self.wait_for_key()
-
-    def test_login_blocked_expected(self):
-        """Тест проверки сценария блокировки пользователя при ответе сервера с кодом 2 и USERBLOCKED."""
-        self.print_test_title("ТЕСТ ОЖИДАЕМОЙ БЛОКИРОВКИ /user/login")
-        print("Этот тест предназначен для проверки пользователя, который по логике БД должен вернуться как заблокированный.")
-        payload = self.build_login_payload()
-        result = self.send_request("/user/login", payload)
-        if isinstance(result, dict):
-            print("\nПРОВЕРКА ОЖИДАЕМЫХ ПОЛЕЙ:")
-            print(f"status = {result.get('status')}")
-            print(f"code = {result.get('code')}")
-            print(f"errorcode = {result.get('errorcode')}")
-            print(f"blocked_until = {result.get('blocked_until')}")
-            print(f"server_time = {result.get('server_time')}")
-        self.wait_for_key()
-
-    def test_blocked_user_update_without_password(self):
-        """Тест запрета обновления данных заблокированного пользователя без смены пароля через /user/update."""
-        self.print_test_title("ТЕСТ ЗАПРЕТА /user/update БЕЗ PASSWORD ПРИ БЛОКИРОВКЕ")
-        user_id = self.input_with_default("Введите ID заблокированного пользователя", "1")
-        email = self.input_with_default("Введите email", "blocked@example.com")
-        payload = {"user_id": user_id, "email": email, "password": ""}
-        self.send_request("/user/update", payload)
-        self.wait_for_key()
-
-    def test_blocked_user_update_with_password(self):
-        """Тест разрешенной смены пароля заблокированного пользователя через /user/update."""
-        self.print_test_title("ТЕСТ СМЕНЫ ПАРОЛЯ ПРИ БЛОКИРОВКЕ /user/update")
-        user_id = self.input_with_default("Введите ID заблокированного пользователя", "1")
-        email = self.input_with_default("Введите email", "blocked@example.com")
-        password = self.input_with_default("Введите новый пароль", "new_secure_password")
-        payload = {"user_id": user_id, "email": email, "password": password}
-        self.send_request("/user/update", payload)
-        self.wait_for_key()
-
-    def test_blocked_ticket_list(self):
-        """Тест запрета обращения к /ticket/list для пользователя в активной блокировке."""
-        self.print_test_title("ТЕСТ БЛОКИРОВКИ /ticket/list ДЛЯ ЗАБЛОКИРОВАННОГО ПОЛЬЗОВАТЕЛЯ")
-        user_id = self.input_with_default("Введите ID заблокированного пользователя", "1")
-        self.send_request("/ticket/list", {"user_id": user_id})
-        self.wait_for_key()
-
-    def test_blocked_document_list(self):
-        """Тест запрета обращения к /document/list для пользователя в активной блокировке."""
-        self.print_test_title("ТЕСТ БЛОКИРОВКИ /document/list ДЛЯ ЗАБЛОКИРОВАННОГО ПОЛЬЗОВАТЕЛЯ")
-        user_id = self.input_with_default("Введите ID заблокированного пользователя", "1")
-        self.send_request("/document/list", {"user_id": user_id})
-        self.wait_for_key()
-
-    def test_blocked_document_signed(self):
-        """Тест запрета обращения к /document/signed для пользователя в активной блокировке."""
-        self.print_test_title("ТЕСТ БЛОКИРОВКИ /document/signed ДЛЯ ЗАБЛОКИРОВАННОГО ПОЛЬЗОВАТЕЛЯ")
-        document_id = self.input_with_default("Введите ID документа", "1")
-        is_signed = self.input_bool01("Установить signed? (0 - нет, 1 - да)", 1)
-        self.send_request("/document/signed", {"document_id": document_id, "is_signed": bool(is_signed)})
-        self.wait_for_key()
-
-    def test_blocked_document_load(self):
-        """Тест запрета обращения к /document/load для пользователя в активной блокировке."""
-        self.print_test_title("ТЕСТ БЛОКИРОВКИ /document/load ДЛЯ ЗАБЛОКИРОВАННОГО ПОЛЬЗОВАТЕЛЯ")
-        file_path = self.input_with_default("Введите путь к файлу", os.path.join(self.files_dir, "test.pdf"))
-        if not os.path.exists(file_path):
-            print(f"Ошибка: файл не найден: {file_path}")
-            self.wait_for_key()
-            return
-        user_id = self.input_with_default("Введите ID заблокированного пользователя", "1")
-        with open(file_path, 'rb') as f:
-            encoded_data = base64.b64encode(f.read()).decode('utf-8')
-        payload = {"user_id": user_id, "description": "Blocked check", "type": "pdf", "name": os.path.basename(file_path), "data": encoded_data}
-        self.send_request("/document/load", payload)
-        self.wait_for_key()
-
-    def test_health_logging(self):
-        """Тест диагностики логирования через endpoint /health/logging."""
-        self.print_test_title("ТЕСТ ДИАГНОСТИКИ ЛОГИРОВАНИЯ /health/logging")
-        self.send_request("/health/logging", {}, use_signature=False, method='GET')
-        self.wait_for_key()
-
-    def test_blocking_acceptance_sequence(self):
-        """
-        Пошаговый приемочный сценарий по ТЗ.
-
-        Сценарий помогает вручную пройти последовательность проверок:
-        1. неверный логин;
-        2. повторный неверный логин;
-        3. ожидаемая блокировка;
-        4. запрет пользовательского запроса к БД;
-        5. смена пароля;
-        6. повторная авторизация.
-        """
-        self.print_test_title("ПРИЕМОЧНЫЙ СЦЕНАРИЙ БЛОКИРОВКИ ПО ТЗ")
-        phone = self.input_with_default("Введите номер телефона тестового пользователя", "9991234567")
-        wrong_password = self.input_with_default("Введите неверный пароль", "wrong_password")
-        new_password = self.input_with_default("Введите новый пароль для разблокировки", "new_secure_password")
-        user_id = self.input_with_default("Введите ID пользователя", "1")
-
-        print("\nШаг 1. Первая неуспешная авторизация")
-        self.send_request("/user/login", {"phone": phone, "password": wrong_password})
-
-        print("\nШаг 2. Вторая неуспешная авторизация")
-        self.send_request("/user/login", {"phone": phone, "password": wrong_password})
-
-        print("\nШаг 3. Проверка возможной блокировки")
-        self.send_request("/user/login", {"phone": phone, "password": wrong_password})
-
-        print("\nШаг 4. Проверка запрета /ticket/list")
-        self.send_request("/ticket/list", {"user_id": user_id})
-
-        print("\nШаг 5. Разрешенная смена пароля /user/update")
-        self.send_request("/user/update", {"user_id": user_id, "email": "user@example.com", "password": new_password})
-
-        print("\nШаг 6. Повторная авторизация с новым паролем")
-        self.send_request("/user/login", {"phone": phone, "password": new_password})
-        self.wait_for_key()
-
     def show_menu(self):
-        """
-        Отображение главного меню тестера.
-
-        Требования интерфейса:
-        - все пункты меню нумеруются;
-        - 0 всегда означает выход;
-        - последними пунктами всегда размещаются:
-          xx. Изменить настройки подключения
-          0. Выход
-        """
         menu_items = [
-            ("Проверка доступности сервера (/health)", self.test_server_health),
-            ("Авторизация пользователя (/user/login)", self.test_login),
-            ("Поиск пользователя (/user/by-phone)", self.test_user_by_phone),
-            ("Изменение данных пользователя (/user/update)", self.test_user_update),
-            ("Изменение согласия на рассылку (/user/mailing)", self.test_user_mailing),
-            ("Список залоговых билетов (/ticket/list)", self.test_ticket_list),
-            ("Запись оплаты (/payment/set)", self.test_payment_set),
-            ("Загрузка документа (/document/load)", self.test_document_load),
-            ("Подписание документа (/document/signed)", self.test_document_signed),
-            ("Список документов (/document/list)", self.test_document_list),
-            ("Расчет распределения платежа (/payment/calculate-distribution)", self.test_payment_calculate_distribution),
-            ("Неверные учетные данные (/user/login)", self.test_login_invalid_credentials),
-            ("Ожидаемая блокировка пользователя (/user/login)", self.test_login_blocked_expected),
-            ("Запрет /user/update без password при блокировке", self.test_blocked_user_update_without_password),
-            ("Смена пароля при блокировке (/user/update)", self.test_blocked_user_update_with_password),
-            ("Запрет /ticket/list для заблокированного пользователя", self.test_blocked_ticket_list),
-            ("Запрет /document/list для заблокированного пользователя", self.test_blocked_document_list),
-            ("Запрет /document/signed для заблокированного пользователя", self.test_blocked_document_signed),
-            ("Запрет /document/load для заблокированного пользователя", self.test_blocked_document_load),
-            ("Диагностика логирования (/health/logging)", self.test_health_logging),
-            ("Приемочный сценарий блокировки по ТЗ", self.test_blocking_acceptance_sequence),
+            ("[+] Поиск пользователя (/user/by-phone)", self.test_user_by_phone),
+            ("[+] Обновление данных (/user/update)", self.test_user_update),
+            ("[+] Email рассылка (/user/mailing)", self.test_user_mailing),
+            ("[+] Залоговые билеты (/ticket/list)", self.test_ticket_list),
+            ("[+] Оплата (/payment/set)", self.test_payment_set),
+            ("[+] Расчет распределения платежа (/payment/calculate-distribution)", self.test_payment_calculate_distribution),
+            ("[+] Вход в систему (/user/login)", self.test_login),
+            ("[+] Загрузка документа (/document/load)", self.test_document_load),
+            ("[+] Подпись документа (/document/signed)", self.test_document_signed),
+            ("[+] Список документов (/document/list)", self.test_document_list),
         ]
 
         while True:
             self.clear_screen()
-            print("=" * 80)
-            print("ТЕСТЕР БЕЗОПАСНОГО ОБМЕНА ДАННЫМИ")
-            print("=" * 80)
-            print(f"Сервер: {self.SERVER_URL}")
+            print("=" * 40)
+            print("    ТЕСТЕР API - ГЛАВНОЕ МЕНЮ")
+            print("=" * 40)
+            print(f"\nАктуально подключенный сервер: {self.SERVER_URL}")
             print(f"Режим вывода: {'краткий' if self.output_mode == 0 else 'полный'}")
-            print("-" * 80)
+            if self.config_path:
+                print(f"Файл конфигурации: {self.config_path}")
+            print("\nДоступные тесты:\n")
+
             for index, (title, _) in enumerate(menu_items, start=1):
-                print(f"{index}. {title}")
-            print(f"{len(menu_items) + 1}. Изменить настройки подключения")
-            print("0. Выход")
-            print("-" * 80)
+                print(f" {index}. {title}")
+
+            print(f"\n {len(menu_items) + 1}. Изменить настройки подключения")
+            print(" 0. Выход\n")
+            print(f"Статус: {len(menu_items)}/{len(menu_items)} тестов доступно")
+            print("=" * 40)
 
             choice = self.input_with_default("Выберите пункт меню", "0")
             if choice == '0':
                 break
+
             try:
                 numeric_choice = int(choice)
             except ValueError:
@@ -611,14 +519,17 @@ class SecureDataExchangeTester:
 
 
 def parse_arguments():
-    """Разбор аргументов командной строки."""
     parser = argparse.ArgumentParser(description="Тестер API безопасного обмена данными")
-    parser.add_argument('config', nargs='?', default=None, help='Необязательный путь к JSON-файлу конфигурации сервера')
+    parser.add_argument(
+        'config',
+        nargs='?',
+        default=None,
+        help='Необязательный путь к JSON-файлу конфигурации сервера'
+    )
     return parser.parse_args()
 
 
 def main():
-    """Точка входа: создание тестера, выбор режима и запуск меню."""
     args = parse_arguments()
     tester = SecureDataExchangeTester(config_path=args.config)
     tester.output_mode = tester.ask_output_mode()
