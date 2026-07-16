@@ -71,6 +71,14 @@ from collections import deque
 
 
 # --- Глобальные переменные и конфигурация ---
+SERVER_INFO = {
+    "server_name": "server_endpoint",
+    "developer_name": "SimonovDV",
+    "version_release_date": "2026-07-15",
+    "version": "1.0.0",
+    "owner_name": "SimonovDV"
+}
+
 # Глобальный словарь для хранения запросов
 request_store = {}
 request_lock = asyncio.Lock()
@@ -5895,6 +5903,21 @@ async def debug_logging_system(request: web.Request, response: web.Response):
 
 
 # --- ОБРАБОТЧИКИ HTTP-ЗАПРОСОВ (ENDPOINTS) ---
+async def health_server_info(request: web.Request) -> web.Response:
+    """
+    Название: health_server_info
+    Назначение: Возвращает метаданные текущей версии сервера
+    Описание: Отдает JSON с названием сервера, разработчиком, датой выхода версии,
+              номером версии и владельцем
+    Входящие параметры: request - объект HTTP запроса
+    Исходящие параметры: web.Response - JSON ответ с кодом статуса 200
+    """
+    response = web.json_response(SERVER_INFO, status=200)
+    await add_server_signature_to_response(
+        response,
+        getattr(request, 'authenticated_token', 'health_server_info')
+    )
+    return response
 
 async def health_check(request: web.Request) -> web.Response:
     """
@@ -9086,6 +9109,7 @@ async def app_factory() -> web.Application:
     
     # Основные эндпоинты
     app.router.add_get('/health', health_check)
+    app.router.add_get('/health/info', health_server_info)
     app.router.add_get('/health/security', health_security)
     app.router.add_get('/health/database', health_database)
     app.router.add_get('/health/logging', health_logging)
