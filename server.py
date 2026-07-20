@@ -179,6 +179,15 @@ class Config:
             normalized_level = str(security_level).lower().strip()
             self.endpoint_security[normalized_endpoint] = normalized_level
 
+        # Конфигурация endpoint_userblocked
+        self.endpoint_userblocked = []
+        endpoint_userblocked_config = security.get('endpoint_userblocked', [])
+        if isinstance(endpoint_userblocked_config, list):
+            for endpoint in endpoint_userblocked_config:
+                normalized_endpoint = str(endpoint).strip('/').lower()
+                if normalized_endpoint:
+                    self.endpoint_userblocked.append(normalized_endpoint)
+
         # НАСТРОЙКИ БЕЗОПАСНОСТИ ВХОДА
         login_security_config = security.get('login_security', {})
         self.login_security = {
@@ -333,6 +342,42 @@ class Config:
         if verbose_mode:
             print_status("INFO", "Правило не найдено, используется стандартная безопасность")
         return None
+    
+    def is_endpoint_userblocked(self, endpoint_path: str) -> bool:
+        """
+        Название: is_endpoint_userblocked
+        Назначение: Проверка наличия эндпоинта в списке endpoint_userblocked
+        Описание: Определяет, содержится ли указанный путь в конфигурационном массиве endpoint_userblocked
+        Принцип работы: Нормализует входной путь и сравнивает его со всеми элементами массива
+                        без учета регистра, начальных и конечных слешей
+        Входящие параметры: endpoint_path - путь эндпоинта
+        Исходящие параметры: bool - True если путь найден в массиве endpoint_userblocked, иначе False
+        """
+        normalized_path = str(endpoint_path or '').strip().strip('/').lower()
+
+        if verbose_mode:
+            print_status(
+                "INFO",
+                f"Проверка endpoint_userblocked для пути: '{endpoint_path}' -> нормализован: '{normalized_path}'"
+            )
+            print_status("INFO", f"Список endpoint_userblocked: {self.endpoint_userblocked}")
+
+        if not normalized_path:
+            if verbose_mode:
+                print_status("INFO", "Пустой путь эндпоинта, возвращаем False")
+            return False
+
+        for blocked_endpoint in self.endpoint_userblocked:
+            normalized_blocked_endpoint = str(blocked_endpoint or '').strip().strip('/').lower()
+            if normalized_path == normalized_blocked_endpoint:
+                if verbose_mode:
+                    print_status("INFO", f"Найдено совпадение в endpoint_userblocked: '{blocked_endpoint}'")
+                return True
+
+        if verbose_mode:
+            print_status("INFO", "Совпадение в endpoint_userblocked не найдено")
+        return False
+
 
     def get_response_token(self, request_token: str = None) -> str:
         """
