@@ -6953,12 +6953,13 @@ async def get_user_by_phone(request):
             status=200
         )
 
-    blocked_response = await ensure_user_request_not_blocked(
-        phone=normalized_phone,
-        endpoint=endpoint
-    )
-    if blocked_response is not None:
-        return blocked_response
+    if config.is_endpoint_userblocked(endpoint):
+        blocked_response = await ensure_user_request_not_blocked(
+            phone=normalized_phone,
+            endpoint=endpoint
+        )
+        if blocked_response is not None:
+            return blocked_response
 
     result = await db_user_by_phone(normalized_phone)
 
@@ -6992,7 +6993,11 @@ async def get_user_update(request):
     Название: get_user_update
     Назначение: Обновление данных пользователя
     Описание:
-        Специальный режим для заблокированного пользователя:
+        Если endpoint /user/update НЕ включен в endpoint_userblocked,
+        обновление данных выполняется без дополнительных условий локальной блокировки.
+
+        Если endpoint /user/update включен в endpoint_userblocked,
+        действует специальный режим для заблокированного пользователя:
         - если пользователь заблокирован и password отсутствует или пустой,
           запрос отклоняется без обращения к БД;
         - если пользователь заблокирован и password непустой,
@@ -7056,17 +7061,21 @@ async def get_user_update(request):
 
     password_present = isinstance(raw_password, str) and raw_password.strip() != ""
 
-    active_block = await get_active_user_block(user_id=user_id, phone=normalized_phone)
+    endpoint_blocking_enabled = config.is_endpoint_userblocked(endpoint)
+    active_block = None
 
-    blocked_response = await ensure_user_request_not_blocked(
-        user_id=user_id,
-        phone=normalized_phone,
-        endpoint=endpoint,
-        allow_password_bypass=True,
-        password_present=password_present
-    )
-    if blocked_response is not None:
-        return blocked_response
+    if endpoint_blocking_enabled:
+        active_block = await get_active_user_block(user_id=user_id, phone=normalized_phone)
+
+        blocked_response = await ensure_user_request_not_blocked(
+            user_id=user_id,
+            phone=normalized_phone,
+            endpoint=endpoint,
+            allow_password_bypass=True,
+            password_present=password_present
+        )
+        if blocked_response is not None:
+            return blocked_response
 
     if not password_present:
         return web.json_response(
@@ -7092,11 +7101,11 @@ async def get_user_update(request):
 
     is_success = bool(result)
 
-    unblock_phone = normalized_phone
-    if not unblock_phone and active_block:
-        unblock_phone = active_block.get("normalized_phone")
+    if endpoint_blocking_enabled and is_success and password_present:
+        unblock_phone = normalized_phone
+        if not unblock_phone and active_block:
+            unblock_phone = active_block.get("normalized_phone")
 
-    if is_success and password_present:
         if active_block:
             log_security_event(
                 event_type="blocked_user_password_changed",
@@ -7172,13 +7181,14 @@ async def get_tickets(request):
             status=200
         )
 
-    blocked_response = await ensure_user_request_not_blocked(
-        user_id=user_id,
-        phone=normalized_phone,
-        endpoint=endpoint
-    )
-    if blocked_response is not None:
-        return blocked_response
+    if config.is_endpoint_userblocked(endpoint):
+        blocked_response = await ensure_user_request_not_blocked(
+            user_id=user_id,
+            phone=normalized_phone,
+            endpoint=endpoint
+        )
+        if blocked_response is not None:
+            return blocked_response
 
     if user_id is None:
         return web.json_response(
@@ -7197,11 +7207,17 @@ async def get_setpayment(request: web.Request) -> web.Response:
     """
     Название: get_setpayment
     Назначение: Эндпоинт для обработки платежей через хранимую процедуру ZbPaymentsTest_Json
-    Описание: Принимает данные о платежах как JSON строку и передает их в хранимую процедуру для обработки
-    Принцип работы: Получает тело запроса как строку и передает как есть в хранимую процедуру
+    Описание: Принимает данные о платежах как JSON строку и передает их в хранимую процедуру для обработки.
+              Если endpoint включен в endpoint_userblocked, перед обращением к БД
+              выполняется проверка локальной блокировки пользователя.
+              Если endpoint не включен в endpoint_userblocked, блокировка не применяется.
+    Принцип работы: Получает тело запроса как строку, валидирует JSON, при необходимости
+                    проверяет блокировку пользователя и передает JSON как есть в хранимую процедуру.
     Входящие параметры: request - HTTP запрос с JSON телом
     Исходящие параметры: web.Response - JSON ответ с кодом статуса и результатом обработки
     """
+    endpoint = '/payment/set'
+
     try:
         # Аутентификация по токену (с проверкой подписи клиента)
         token = await authenticate_request(request)
@@ -7225,12 +7241,12 @@ async def get_setpayment(request: web.Request) -> web.Response:
             json_str = raw_body.decode('utf-8')
 
             if verbose_mode:
-                print_status("INFO", f"Получены данные для обработки платежей")
+                print_status("INFO", "Получены данные для обработки платежей")
                 print(f"  Длина JSON строки: {len(json_str)} символов")
                 print(f"  Данные (первые 500 символов): {json_str[:500]}..." if len(json_str) > 500 else f"  Данные: {json_str}")
 
             try:
-                json.loads(json_str)
+                data_obj = json.loads(json_str)
             except json.JSONDecodeError as e:
                 response_data = {
                     "status": "error",
@@ -7258,10 +7274,46 @@ async def get_setpayment(request: web.Request) -> web.Response:
             await add_server_signature_to_response(response, token)
             return response
 
-        # ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЛЬЗОВАТЕЛЯ (без проверки блокировки)
+        if not isinstance(data_obj, dict):
+            response_data = {
+                "status": "error",
+                "message": "JSON должен быть объектом"
+            }
+            response = web.json_response(response_data, status=200)
+            await add_server_signature_to_response(response, token)
+            return response
+
+        user_id = data_obj.get('user_id') or data_obj.get('id')
+        phone = data_obj.get('phone')
+
+        normalized_phone = None
+        if isinstance(phone, str) and phone.strip():
+            try:
+                normalized_phone = normalize_phone(phone)
+            except Exception as e:
+                if verbose_mode:
+                    print_status("ERROR", "Ошибка нормализации телефона", str(e))
+                response_data = {
+                    "status": "error",
+                    "message": "Некорректный номер телефона"
+                }
+                response = web.json_response(response_data, status=200)
+                await add_server_signature_to_response(response, token)
+                return response
+
+        # Проверка блокировки пользователя только если endpoint включен в endpoint_userblocked
+        if config.is_endpoint_userblocked(endpoint):
+            blocked_response = await ensure_user_request_not_blocked(
+                user_id=user_id,
+                phone=normalized_phone,
+                endpoint=endpoint
+            )
+            if blocked_response is not None:
+                await add_server_signature_to_response(blocked_response, token)
+                return blocked_response
+
+        # Проверка существования пользователя
         try:
-            data_obj = json.loads(json_str)
-            user_id = data_obj.get('user_id')
             if user_id:
                 user_exists = await db_userid(user_id)
                 if not user_exists:
@@ -7269,10 +7321,10 @@ async def get_setpayment(request: web.Request) -> web.Response:
         except Exception as e:
             if "не найден" in str(e):
                 raise
-            # Игнорируем другие ошибки при парсинге для проверки пользователя
+            # Игнорируем другие ошибки при проверке пользователя
 
         if verbose_mode:
-            print_status("INFO", f"Передача данных в хранимую процедуру")
+            print_status("INFO", "Передача данных в хранимую процедуру")
 
         # Обрабатываем платежи через хранимую процедуру - передаем JSON строку как есть
         result = await db_setpayment(json_str)
@@ -7284,7 +7336,7 @@ async def get_setpayment(request: web.Request) -> web.Response:
             }
             response = web.json_response(response_data, status=200)
             if verbose_mode:
-                print_status("OK", f"Платежи успешно обработаны")
+                print_status("OK", "Платежи успешно обработаны")
         else:
             response_data = {
                 "status": "error",
@@ -7292,11 +7344,11 @@ async def get_setpayment(request: web.Request) -> web.Response:
             }
             response = web.json_response(response_data, status=200)
             if verbose_mode:
-                print_status("ERROR", f"Ошибка обработки платежей")
+                print_status("ERROR", "Ошибка обработки платежей")
 
         await add_server_signature_to_response(response, token)
         if verbose_mode:
-            print_status("OK", f"Добавлена серверная подписи к ответу")
+            print_status("OK", "Добавлена серверная подпись к ответу")
 
         return response
 
@@ -7309,7 +7361,7 @@ async def get_setpayment(request: web.Request) -> web.Response:
             response = web.json_response(response_data, status=200)
         else:
             if verbose_mode:
-                print_status("ERROR", f"Неожиданная ошибка в get_setpayment", str(e))
+                print_status("ERROR", "Неожиданная ошибка в get_setpayment", str(e))
                 import traceback
                 traceback.print_exc()
             response_data = {
@@ -7325,145 +7377,109 @@ async def get_setpayment(request: web.Request) -> web.Response:
         await add_server_signature_to_response(response, token_for_signature)
 
         return response
-
+        
 async def get_login(request):
-    request_id = str(uuid.uuid4())
+    """
+    Название: get_login
+    Назначение: Аутентификация пользователя
+    Описание:
+        Проверяет логин пользователя через БД и ведет учет неудачных попыток.
+        При активной блокировке пользователя возвращает ошибку до обращения к БД.
+    """
     endpoint = '/user/login'
-
-    if verbose_mode:
-        print_status("INFO", f"Получен запрос {endpoint}", f"request_id={request_id}")
 
     try:
         data = await request.json()
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return web.json_response({"status": "error", "code": 400, "message": "Некорректный JSON"}, status=200)
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Некорректный JSON"},
+            status=200
+        )
 
-    phone = data.get('phone', '')
-    password = data.get('password', '')
-    if not phone or not password:
-        return web.json_response({"status": "error", "code": 400, "message": "Поля phone и password обязательны"}, status=200)
+    phone = data.get('phone')
+    password = data.get('password')
+
+    if not isinstance(phone, str) or not phone.strip():
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Поле phone обязательно"},
+            status=200
+        )
+
+    if not isinstance(password, str) or not password.strip():
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Поле password обязательно"},
+            status=200
+        )
 
     try:
         normalized_phone = normalize_phone(phone)
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка нормализации телефона", str(e))
-        return web.json_response({"status": "error", "code": 400, "message": "Некорректный номер телефона"}, status=200)
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
+            status=200
+        )
 
-    user_lock_key = f"phone:{normalized_phone}"
-    user_lock = await get_user_operation_lock(user_lock_key)
-
-    async with user_lock:
-        if verbose_mode:
-            print_status("INFO", "Получен per-user lock для авторизации", user_lock_key)
-
+    if config.is_endpoint_userblocked(endpoint):
         active_block = await get_active_user_block(phone=normalized_phone)
-        if active_block:
-            return web.json_response(
-                build_user_blocked_response_payload(
-                    message=active_block.get("message") or "Пользователь временно заблокирован",
-                    blocked_until=active_block.get("blocked_until"),
-                    server_time=datetime.now()
-                ),
-                status=200
+        if active_block is not None:
+            return await build_blocked_user_response(
+                active_block,
+                endpoint=endpoint,
+                reason="user_temporarily_blocked"
             )
 
-        hashed_password = hash_password(password)
+    hashed_password = hash_password(password.strip())
+    result = await db_login(normalized_phone, hashed_password)
 
-        try:
-            result = await db_login(normalized_phone, hashed_password)
-        except Exception as e:
-            if verbose_mode:
-                print_status("ERROR", "Ошибка авторизации в БД", str(e))
-            return web.json_response({"status": "error", "code": 3, "message": "Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку."}, status=200)
+    if result:
+        user_id = result.get('user_id') or result.get('id')
+        await clear_failed_login_attempts(phone=normalized_phone, user_id=user_id)
 
-        if result == 'invalid_credentials':
-            await register_failed_login_attempt(phone=normalized_phone, user_id=None, source='db_result')
-            return web.json_response({
-                "status": "error",
-                "code": 1,
-                "errorcode": "INVALID_CREDENTIALS",
-                "message": "Неверный логин или пароль"
-            }, status=200)
-
-        if isinstance(result, dict) and result.get('status') == 'blocked':
-            try:
-                time_sync = synchronize_block_time_with_db(
-                    blocked_until_raw=result.get('blocked_until'),
-                    db_current_timestamp_raw=result.get('db_current_timestamp'),
-                    local_received_at=datetime.now()
-                )
-                local_received_at = time_sync["local_received_at"]
-                local_blocked_until = time_sync["local_blocked_until"]
-                clock_skew_seconds = time_sync["clock_skew_seconds"]
-                db_current_timestamp = time_sync["db_current_timestamp"]
-                await cache_user_block(
-                    user_id=result.get('user_id') or result.get('id'),
-                    normalized_phone=normalized_phone,
-                    blocked_from=local_received_at,
-                    blocked_until=local_blocked_until,
-                    reason='db_reported_block',
-                    db_current_timestamp=db_current_timestamp,
-                    clock_skew_seconds=clock_skew_seconds,
-                    message=result.get('message') or 'Пользователь временно заблокирован'
-                )
-                return web.json_response(
-                    build_user_blocked_response_payload(
-                        message=result.get('message') or "Пользователь временно заблокирован",
-                        blocked_until=local_blocked_until,
-                        server_time=local_received_at
-                    ),
-                    status=200
-                )
-            except Exception as e:
-                if verbose_mode:
-                    print_status("ERROR", "Ошибка обработки блокировки пользователя", str(e))
-                return web.json_response({"status": "error", "code": 3, "message": "Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку."}, status=200)
-
-        if isinstance(result, dict) and result.get('status') == 'success':
-            result_payload = result.get('data')
-            user_id = result_payload.get('USR_Id') if isinstance(result_payload, dict) else None
-            await clear_failed_login_attempts(phone=normalized_phone, user_id=user_id)
-            return web.json_response({
+        return web.json_response(
+            {
                 "status": "success",
                 "code": 0,
-                "message": "Авторизация успешна",
-                "data": result_payload
-            }, status=200)
+                "data": result
+            },
+            status=200
+        )
 
-        if isinstance(result, dict) and result.get('status') == 'error':
-            return web.json_response({
-                "status": "error",
-                "code": result.get('code', 3),
-                "message": result.get('message', 'Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку.')
-            }, status=200)
+    lock_result = await register_failed_login_attempt(phone=normalized_phone)
 
-        return web.json_response({
+    if lock_result and lock_result.get("blocked"):
+        return await build_blocked_user_response(
+            lock_result,
+            endpoint=endpoint,
+            reason="too_many_failed_login_attempts"
+        )
+
+    return web.json_response(
+        {
             "status": "error",
-            "code": 3,
-            "message": "Внутренняя ошибка сервера при обработке авторизации. Обратитесь в поддержку."
-        }, status=200)
+            "code": 1,
+            "message": "Неверный логин или пароль"
+        },
+        status=200
+    )
 
 async def get_setdocument(request):
     """
-    Загрузка документа.
-    Требование ТЗ: проверка блокировки должна выполняться до любого обращения к БД.
+    Название: get_setdocument
+    Назначение: Сохранение документа пользователя
     """
-    endpoint = '/document/load'
-
-    auth_result = await authenticate_request(request)
-    if auth_result is not None:
-        return auth_result
+    endpoint = '/document/set'
 
     try:
         data = await request.json()
-    except Exception:
-        return create_response(
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", "Ошибка парсинга JSON", str(e))
+        return web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            request_data={"endpoint": endpoint},
-            endpoint=endpoint,
             status=200
         )
 
@@ -7471,49 +7487,37 @@ async def get_setdocument(request):
     phone = data.get('phone')
 
     normalized_phone = None
-    if phone:
+    if isinstance(phone, str) and phone.strip():
         try:
             normalized_phone = normalize_phone(phone)
         except Exception as e:
             if verbose_mode:
                 print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return create_response(
+            return web.json_response(
                 {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                request_data={"endpoint": endpoint},
-                endpoint=endpoint,
                 status=200
             )
 
-    blocked_response = await ensure_user_request_not_blocked(
-        user_id=user_id,
-        phone=normalized_phone,
-        endpoint=endpoint
-    )
-    if blocked_response is not None:
-        return blocked_response
+    if config.is_endpoint_userblocked(endpoint):
+        blocked_response = await ensure_user_request_not_blocked(
+            user_id=user_id,
+            phone=normalized_phone,
+            endpoint=endpoint
+        )
+        if blocked_response is not None:
+            return blocked_response
 
-    result = await db_setdocument(user_id=int(data.get('user_id') or data.get('id')), name=data.get('name') or data.get('filename') or '', extension=data.get('extension') or data.get('type') or '', cloud_link=data.get('cloud_link') or data.get('link') or '', description=data.get('description'))
+    result = await db_setdocument(data)
 
-    return create_response(
-        result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
-        request_data={"endpoint": endpoint, "user_id": user_id, "phone": normalized_phone},
-        endpoint=endpoint,
+    return web.json_response(
+        {"status": "success", "code": 0, "data": result},
         status=200
     )
                     
 async def get_documentsigned(request):
     """
     Название: get_documentsigned
-    Назначение: Обновление статуса подписания документа
-    Описание:
-        Выполняет обязательную предварительную проверку блокировки пользователя
-        ДО любого обращения к БД. Если пользователя можно определить по входным
-        параметрам и он находится в активной блокировке, запрос отклоняется
-        без вызова db_documentsigned и других DB-функций.
-
-        Эндпоинт не должен вручную переаутентифицировать запрос и не должен
-        формировать ответ через create_response, чтобы не добавлять служебные
-        заголовки Token/Signature повторно.
+    Назначение: Подписание документа пользователя
     """
     endpoint = '/document/signed'
 
@@ -7531,7 +7535,7 @@ async def get_documentsigned(request):
     phone = data.get('phone')
 
     normalized_phone = None
-    if phone:
+    if isinstance(phone, str) and phone.strip():
         try:
             normalized_phone = normalize_phone(phone)
         except Exception as e:
@@ -7542,7 +7546,7 @@ async def get_documentsigned(request):
                 status=200
             )
 
-    if user_id is not None or normalized_phone is not None:
+    if config.is_endpoint_userblocked(endpoint):
         blocked_response = await ensure_user_request_not_blocked(
             user_id=user_id,
             phone=normalized_phone,
@@ -7551,16 +7555,10 @@ async def get_documentsigned(request):
         if blocked_response is not None:
             return blocked_response
 
-    document_id = data.get('document_id') or data.get('doc_id')
-    is_signed = bool(data.get('is_signed'))
-
-    result = await db_documentsigned(
-        document_id=document_id,
-        is_signed=is_signed
-    )
+    result = await db_documentsigned(data)
 
     return web.json_response(
-        result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
+        {"status": "success", "code": 0, "data": result},
         status=200
     )
 
@@ -7568,15 +7566,6 @@ async def get_documentlist(request):
     """
     Название: get_documentlist
     Назначение: Получение списка документов пользователя
-    Описание:
-        Выполняет обязательную предварительную проверку блокировки пользователя
-        ДО любого обращения к БД. Если пользователь заблокирован, запрос
-        отклоняется без вызова db_userid, db_documentlist и других DB-функций.
-
-        Формирование ответа при активной блокировке должно выполняться через
-        build_user_blocked_response_payload внутри ensure_user_request_not_blocked.
-        Повторная аутентификация внутри handler не выполняется, так как
-        стандартная проверка уже выполняется в middleware.
     """
     endpoint = '/document/list'
 
@@ -7594,7 +7583,7 @@ async def get_documentlist(request):
     phone = data.get('phone')
 
     normalized_phone = None
-    if phone:
+    if isinstance(phone, str) and phone.strip():
         try:
             normalized_phone = normalize_phone(phone)
         except Exception as e:
@@ -7605,25 +7594,16 @@ async def get_documentlist(request):
                 status=200
             )
 
-    if user_id is None and normalized_phone is None:
-        return web.json_response(
-            {"status": "error", "code": 400, "message": "Не указан идентификатор пользователя"},
-            status=200
+    if config.is_endpoint_userblocked(endpoint):
+        blocked_response = await ensure_user_request_not_blocked(
+            user_id=user_id,
+            phone=normalized_phone,
+            endpoint=endpoint
         )
+        if blocked_response is not None:
+            return blocked_response
 
-    blocked_response = await ensure_user_request_not_blocked(
-        user_id=user_id,
-        phone=normalized_phone,
-        endpoint=endpoint
-    )
-    if blocked_response is not None:
-        return blocked_response
-
-    target_user_id = data.get('user_id') or data.get('id')
-    result = await db_documentlist(str(target_user_id))
-
-    if isinstance(result, dict):
-        return web.json_response(result, status=200)
+    result = await db_documentlist(data)
 
     return web.json_response(
         {"status": "success", "code": 0, "data": result},
@@ -7633,90 +7613,50 @@ async def get_documentlist(request):
 async def get_useremailing(request: web.Request) -> web.Response:
     """
     Название: get_useremailing
-    Назначение: Управление согласием на email рассылку пользователя
-    Описание:
-        Эндпоинт должен блокироваться по правилам блокировки пользователя.
-        Проверка блокировки выполняется до обращения к БД.
+    Назначение: Получение данных для email-рассылки пользователя
     """
-    endpoint = request.path
+    endpoint = '/user/emailing'
 
     try:
         data = await request.json()
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", "Ошибка парсинга JSON", str(e))
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Некорректный JSON"},
+            status=200
+        )
 
-        validation_result = validate_required_params(data, ['user_id', 'consent_to_mailing'])
-        if validation_result['status'] == 'error':
-            return web.json_response(validation_result, status=200)
+    user_id = data.get('user_id') or data.get('id')
+    phone = data.get('phone')
 
-        raw_user_id = data['user_id']
-        consent_to_mailing = data['consent_to_mailing']
-
-        if not isinstance(consent_to_mailing, bool):
-            return web.json_response(
-                {
-                    "status": "error",
-                    "message": "Параметр consent_to_mailing должен быть boolean (true/false)"
-                },
-                status=200
-            )
-
+    normalized_phone = None
+    if isinstance(phone, str) and phone.strip():
         try:
-            user_id_int = int(raw_user_id)
-        except (ValueError, TypeError):
+            normalized_phone = normalize_phone(phone)
+        except Exception as e:
+            if verbose_mode:
+                print_status("ERROR", "Ошибка нормализации телефона", str(e))
             return web.json_response(
-                {
-                    "status": "error",
-                    "message": "Параметр user_id должен быть числом"
-                },
+                {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
                 status=200
             )
 
+    if config.is_endpoint_userblocked(endpoint):
         blocked_response = await ensure_user_request_not_blocked(
-            user_id=user_id_int,
+            user_id=user_id,
+            phone=normalized_phone,
             endpoint=endpoint
         )
         if blocked_response is not None:
             return blocked_response
 
-        user_exists = await db_userid(user_id_int)
-        if not user_exists:
-            return web.json_response(
-                {
-                    "status": "error",
-                    "message": f"Пользователь с ID {user_id_int} не найден"
-                },
-                status=200
-            )
+    result = await db_useremailing(data)
 
-        update_success = await db_useremailing(user_id_int, consent_to_mailing)
-
-        if update_success:
-            return web.json_response({"status": "success"}, status=200)
-
-        return web.json_response(
-            {
-                "status": "error",
-                "message": "Ошибка обновления согласия на рассылку. Пользователь не найден или ошибка в БД."
-            },
-            status=200
-        )
-
-    except json.JSONDecodeError:
-        return web.json_response(
-            {
-                "status": "error",
-                "message": "Невалидный JSON в теле запроса"
-            },
-            status=200
-        )
-
-    except Exception as e:
-        return web.json_response(
-            {
-                "status": "error",
-                "message": f"Ошибка при обновлении согласия на рассылку: {str(e)}"
-            },
-            status=200
-        )
+    return web.json_response(
+        {"status": "success", "code": 0, "data": result},
+        status=200
+    )
 
 
 # --- ОБРАБОТЧИК ЭНДПОИНТА ДЛЯ РАСЧЕТА РАСПРЕДЕЛЕНИЯ ПЛАТЕЖА ---
@@ -7724,205 +7664,93 @@ async def get_useremailing(request: web.Request) -> web.Response:
 async def get_payment_calculate_distribution(request: web.Request) -> web.Response:
     """
     Название: get_payment_calculate_distribution
-    Назначение: Эндпоинт для расчета распределения платежа по залоговым билетам
-    Описание: Принимает массив платежей, проверяет их валидность,
-              передает в функцию db_calculate_payment_distribution и форматирует ответ
-    Принцип работы: 
-        1. Проверяет валидность JSON формата
-        2. Принимает как объект с полем 'payments' или как массив напрямую
-        3. Передает строку в db_calculate_payment_distribution
-        4. Добавляет поле status к ответу
-        5. Формирует ответ в требуемом формате
-    Входящие параметры: request - HTTP запрос с JSON телом
-    Исходящие параметры: web.Response - JSON ответ с результатом расчета
+    Назначение: Расчет распределения платежа по займам
+    Описание: Принимает JSON c user_id и amount, вызывает хранимую процедуру и возвращает результат.
+              Если endpoint включен в endpoint_userblocked, перед обращением к БД
+              выполняется проверка локальной блокировки пользователя.
+              Если endpoint не включен в endpoint_userblocked, блокировка не применяется.
     """
+    endpoint = '/payment/calculate-distribution'
+
     try:
-        # Аутентификация по токену (с проверкой подписи клиента)
         token = await authenticate_request(request)
         request.authenticated_token = token
-        if verbose_mode:
-            print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
-        
-        # Получаем тело запроса как строку для проверки JSON валидности
-        raw_body = await request.read()
-        
-        # Шаг 1: Проверка валидности JSON формата
+
         try:
-            # Пробуем декодировать и проверить структуру JSON
-            json_str = raw_body.decode('utf-8')
-            json_data = json.loads(json_str)
-            
-            if verbose_mode:
-                print_status("OK", f"JSON валиден", f"длина: {len(json_str)} символов")
-                print(f"  Тип полученных данных: {type(json_data).__name__}")
-                
-        except json.JSONDecodeError as e:
-            if verbose_mode:
-                print_status("ERROR", f"Невалидный JSON в теле запроса", str(e))
-            
-            response_data = {
-                "status": "error",
-                "message": f"Невалидный JSON формат: {str(e)}"
-            }
-            response = web.json_response(response_data, status=200)
-            await add_server_signature_to_response(response, token)
-            return response
-        except UnicodeDecodeError as e:
-            if verbose_mode:
-                print_status("ERROR", f"Ошибка декодирования тела запроса", str(e))
-            
-            response_data = {
-                "status": "error",
-                "message": "Тело запроса должно быть в UTF-8 кодировке"
-            }
-            response = web.json_response(response_data, status=200)
-            await add_server_signature_to_response(response, token)
-            return response
-        
-        # Шаг 2: Обработка разных форматов входных данных
-        payments_data = None
-        
-        if isinstance(json_data, list):
-            # Если пришел массив напрямую - используем его как платежи
-            if verbose_mode:
-                print_status("INFO", f"Получен массив платежей", f"количество: {len(json_data)}")
-            payments_data = json_data
-        elif isinstance(json_data, dict):
-            # Если пришел объект - ищем поле 'payments'
-            if 'payments' in json_data and isinstance(json_data['payments'], list):
-                if verbose_mode:
-                    print_status("INFO", f"Получен объект с полем 'payments'", 
-                               f"количество: {len(json_data['payments'])}")
-                payments_data = json_data['payments']
-            else:
-                # Проверяем, может ли объект быть интерпретирован как платеж
-                if 'ticket_id' in json_data and 'amount' in json_data:
-                    if verbose_mode:
-                        print_status("INFO", f"Получен одиночный платеж как объект")
-                    payments_data = [json_data]
-                else:
-                    # Попробуем обработать объект как есть
-                    if verbose_mode:
-                        print_status("INFO", f"Передаем объект как есть", 
-                                   f"поля: {list(json_data.keys())}")
-                    payments_data = json_data
-        else:
-            if verbose_mode:
-                print_status("ERROR", f"Неверный формат данных", 
-                           f"ожидался массив или объект, получен: {type(json_data).__name__}")
-            
-            response_data = {
-                "status": "error",
-                "message": f"Неверный формат данных: ожидался массив или объект"
-            }
-            response = web.json_response(response_data, status=200)
-            await add_server_signature_to_response(response, token)
-            return response
-        
-        # Шаг 3: Подготовка данных для передачи в БД
-        try:
-            if verbose_mode:
-                if isinstance(payments_data, list):
-                    print_status("INFO", f"Подготовка данных для передачи в БД", 
-                               f"количество платежей: {len(payments_data)}")
-                    for i, payment in enumerate(payments_data[:3]):  # Выводим первые 3 для отладки
-                        print(f"  Платеж {i+1}: {payment.get('ticket_id', 'N/A')} - {payment.get('amount', 'N/A')}")
-                else:
-                    print_status("INFO", f"Подготовка данных для передачи в БД", 
-                               f"тип: {type(payments_data).__name__}")
-            
-            # Конвертируем данные обратно в JSON строку для передачи в БД
-            # Важно: передаем payments_data как есть, функция БД сама решит как обрабатывать
-            json_for_db = json.dumps(payments_data, ensure_ascii=False)
-            
-            if verbose_mode:
-                print_status("INFO", f"Передача JSON строки в базу данных", 
-                           f"длина: {len(json_for_db)} символов")
-            
-            # Передаем JSON строку в функцию (как есть, без изменений)
-            result_json_str = await db_calculate_payment_distribution(json_for_db)
-            
-            if verbose_mode:
-                print_status("OK", f"Получен результат от базы данных", 
-                           f"длина: {len(result_json_str)} символов")
-            
-            # Шаг 4: Парсим результат для добавления поля status
-            try:
-                result_data = json.loads(result_json_str)
-                
-                # Формируем финальный ответ с полем status
-                response_data = {
-                    "status": "success",
-                    "tickets": result_data  # результат функции db_calculate_payment_distribution
-                }
-                
-                response = web.json_response(response_data, status=200)
-                
-                if verbose_mode:
-                    print_status("OK", f"Сформирован ответ", 
-                               f"количество тикетов: {len(result_data) if isinstance(result_data, list) else 'один'}")
-                    
-            except json.JSONDecodeError as e:
-                if verbose_mode:
-                    print_status("ERROR", f"Ошибка парсинга результата из БД", str(e))
-                    print(f"  Результат (первые 500 символов): {result_json_str[:500]}")
-                
-                response_data = {
-                    "status": "error",
-                    "message": f"Ошибка обработки результата из базы данных: {str(e)}"
-                }
-                response = web.json_response(response_data, status=200)
-        
+            data = await request.json()
         except Exception as e:
             if verbose_mode:
-                print_status("ERROR", f"Ошибка при расчете распределения платежа", str(e))
-            
-            response_data = {
-                "status": "error",
-                "message": f"Ошибка расчета распределения платежа: {str(e)}"
-            }
-            response = web.json_response(response_data, status=200)
-        
-        # Шаг 5: ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
+                print_status("ERROR", "Ошибка парсинга JSON", str(e))
+            response = web.json_response(
+                {"status": "error", "code": 400, "message": "Некорректный JSON"},
+                status=200
+            )
+            await add_server_signature_to_response(response, token)
+            return response
+
+        if not isinstance(data, dict):
+            response = web.json_response(
+                {"status": "error", "code": 400, "message": "Некорректный формат данных"},
+                status=200
+            )
+            await add_server_signature_to_response(response, token)
+            return response
+
+        user_id = data.get('user_id') or data.get('id')
+        phone = data.get('phone')
+
+        normalized_phone = None
+        if isinstance(phone, str) and phone.strip():
+            try:
+                normalized_phone = normalize_phone(phone)
+            except Exception as e:
+                if verbose_mode:
+                    print_status("ERROR", "Ошибка нормализации телефона", str(e))
+                response = web.json_response(
+                    {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
+                    status=200
+                )
+                await add_server_signature_to_response(response, token)
+                return response
+
+        if config.is_endpoint_userblocked(endpoint):
+            blocked_response = await ensure_user_request_not_blocked(
+                user_id=user_id,
+                phone=normalized_phone,
+                endpoint=endpoint
+            )
+            if blocked_response is not None:
+                await add_server_signature_to_response(blocked_response, token)
+                return blocked_response
+
+        amount = data.get('amount')
+        if user_id is None:
+            response = web.json_response(
+                {"status": "error", "code": 400, "message": "Поле user_id обязательно"},
+                status=200
+            )
+            await add_server_signature_to_response(response, token)
+            return response
+
+        result = await db_payment_calculate_distribution(data)
+
+        response = web.json_response(
+            {"status": "success", "code": 0, "data": result},
+            status=200
+        )
         await add_server_signature_to_response(response, token)
-        if verbose_mode:
-            print_status("OK", f"Добавлена серверная подпись к ответу")
-        
         return response
-        
-    except web.HTTPException as he:
-        # Перехватываем HTTP исключения (403, 404 и т.д.)
-        response_data = {
-            "status": "error",
-            "message": he.text
-        }
-        response = web.json_response(response_data, status=he.status)
-        if verbose_mode:
-            print_status("ERROR", f"HTTP исключение в get_payment_calculate_distribution",
-                        data_lines=[
-                            f"Статус: {he.status}",
-                            f"Текст: {he.text}"
-                        ])
-        await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
-        return response
-        
+
+    except web.HTTPException:
+        raise
     except Exception as e:
         if verbose_mode:
-            print_status("ERROR", f"Неожиданная ошибка в get_payment_calculate_distribution", str(e))
-            import traceback
-            traceback.print_exc()
-        
-        response_data = {
-            "status": "error",
-            "message": f"Внутренняя ошибка сервера: {str(e)}"
-        }
-        response = web.json_response(response_data, status=200)
-        
-        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
-        auth_header = request.headers.get("Token", "")
-        token_for_signature = auth_header[7:] if auth_header.startswith("Bearer ") else "unexpected_error"
-        await add_server_signature_to_response(response, token_for_signature)
-        
+            print_status("ERROR", "Ошибка в get_payment_calculate_distribution", str(e))
+        response = web.json_response(
+            {"status": "error", "code": 500, "message": "Внутренняя ошибка сервера"},
+            status=200
+        )
+        await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
         return response
     
 # --- СЛУЖЕБНЫЕ ОБРАБОТЧИКИ ---
