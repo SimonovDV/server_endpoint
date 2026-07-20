@@ -39,6 +39,13 @@
       "health/stat": "public",
       "help": "public"
     },
+    "endpoint_userblocked": [
+      "/user/login",
+      "/user/by-phone",
+      "/user/update",
+      "/ticket/list"
+    ],
+
     "login_security": {
       "enabled": true,
       "max_failed_attempts": 5,
