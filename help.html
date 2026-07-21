@@ -7159,6 +7159,56 @@ function showJSONStatus(message, type) {
 }
 
 
+function normalizeEndpointPath(path) {
+    if (!path) return '';
+    return String(path).trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+}
+
+function applyUserBlockedBadges() {
+    const badgeElements = document.querySelectorAll('.user_blocked');
+
+    if (!badgeElements.length) {
+        return;
+    }
+
+    try {
+        const response = await fetch(getApiUrl('/health/security'), {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        const normalizedEndpoints = data?.endpoint_userblocking?.normalized_endpoints || [];
+        const blockedSet = new Set(
+            normalizedEndpoints
+                .map(item => normalizeEndpointPath(item))
+                .filter(Boolean)
+        );
+
+        badgeElements.forEach((element) => {
+            const endpointRaw = element.getAttribute('data') || '';
+            const endpointNormalized = normalizeEndpointPath(endpointRaw);
+
+            if (blockedSet.has(endpointNormalized)) {
+                element.classList.add('is-visible');
+            } else {
+                element.classList.remove('is-visible');
+            }
+        });
+    } catch (error) {
+        badgeElements.forEach((element) => {
+            element.classList.remove('is-visible');
+        });
+        console.error('Не удалось обновить индикаторы user_blocked:', error);
+    }
+}
+
 // Инициализация событий
 document.addEventListener('DOMContentLoaded', function() {
     // События для JSON редактора
@@ -7187,6 +7237,8 @@ document.addEventListener('DOMContentLoaded', function() {
             closeConfigEditor();
         }
     });
+
+    applyUserBlockedBadges();
 });
 
 
