@@ -1409,6 +1409,25 @@ body {
     border-radius: 4px;
 }
 
+.user_blocked {
+    display: none;
+    margin-left: 12px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffe69c;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.user_blocked.is-visible {
+    display: inline-block;
+}
+
 /* Адаптивность для мобильных устройств */
 @media (max-width: 768px) {
     .modal-content {
@@ -2575,6 +2594,7 @@ python3 server.py --status
                 <div id="document-list">
                     <div class="endpoint">
                         <span class="method">POST</span> /document/list
+                        <span class="user_blocked" data="/document/list">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Получение списка документов пользователя.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature')</p>
