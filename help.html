@@ -2675,6 +2675,18 @@ python3 server.py --status
     "message": "Ошибка при получении списка документов"
 }
                     </div>
+                    <h4>Пример ответа при блокировке пользователя:   <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                    </div>                    
 
                     <h4>Особенности работы:</h4>
                     <ul class="values-list">
@@ -2767,6 +2779,18 @@ python3 server.py --status
     "link": "https://cloud.comul.ru/d/f/12345"
 }
                     </div>
+
+                    <h4>Пример ответа при блокировке пользователя: <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                    </div>                    
                 </div>
 
                 <!-- ========== /document/signed ========== -->
@@ -2849,6 +2873,17 @@ python3 server.py --status
     "message": "Параметр is_signed должен быть boolean (true/false)"
 }
                     </div>
+                    <h4>Пример ответа при блокировке пользователя: <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                    </div>                    
                 </div>
 
                 <!-- ========== /payment/set ========== -->
@@ -2916,40 +2951,52 @@ python3 server.py --status
 
                     <h4>Пример запроса:</h4>
                     <div class="code-block">
-                {
-                    "transaction_id": "23d93cac-000f-5000-8000-126628f15141",
-                    "user_id": "000f-5000-8000-126628f15141",
-                    "amount_due": 198.00,
-                    "payments": [
-                        {
-                            "ticket_id": "45d93cac-000f-5000-8000-133328f15141",
-                            "date": "13.07.2025",
-                            "amount": 100.00
-                        },
-                        {
-                            "ticket_id": "123123-000f-5000-8000-133328f15141",
-                            "date": "13.07.2025",
-                            "amount": 98.00
-                        }
-                    ]
-                }
+{
+    "transaction_id": "23d93cac-000f-5000-8000-126628f15141",
+    "user_id": "000f-5000-8000-126628f15141",
+    "amount_due": 198.00,
+    "payments": [
+        {
+            "ticket_id": "45d93cac-000f-5000-8000-133328f15141",
+            "date": "13.07.2025",
+            "amount": 100.00
+        },
+        {
+            "ticket_id": "123123-000f-5000-8000-133328f15141",
+            "date": "13.07.2025",
+            "amount": 98.00
+        }
+    ]
+}
                     </div>
 
                     <h4>Пример успешного ответа:</h4>
                     <div class="code-block">
-                {
-                    "status": "success",
-                    "message": "Платежи успешно обработаны"
-                }
+{
+    "status": "success",
+    "message": "Платежи успешно обработаны"
+}
                     </div>
 
                     <h4>Пример ответа при ошибке:</h4>
                     <div class="code-block">
-                {
-                    "status": "error",
-                    "message": "Ошибка обработки платежей"
-                }
+{
+    "status": "error",
+    "message": "Ошибка обработки платежей"
+}
                     </div>
+
+                    <h4>Пример ответа при блокировке пользователя: <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                    </div>                    
                 </div>
 
 
@@ -3186,6 +3233,18 @@ python3 server.py --status
                             <td>Сумма платежа, распределенная на данный предмет (рубли)</td>
                         </tr>
                     </table>
+
+                    <h4>Пример ответа при блокировке пользователя: <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                    </div>                    
                 </div>
 
 
@@ -3298,6 +3357,18 @@ python3 server.py --status
                         <p>tickets.items.characteristics.<strong>name</strong> - название характеристики</p>
                         <p>tickets.items.characteristics.<strong>value</strong> - значение характеристики</p>
                     </div>
+
+                    <h4>Пример ответа при блокировке пользователя: <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                    </div>                    
                 </div>
 
                 <!-- ========== /user/by-phone ========== -->
@@ -3349,34 +3420,46 @@ python3 server.py --status
 
                     <h4>Пример запроса:</h4>
                     <div class="code-block">
-                {
-                    "phone": "+79123456789"
-                }
+{
+    "phone": "+79123456789"
+}
                     </div>
 
                     <h4>Пример успешного ответа:</h4>
                     <div class="code-block">
-                {
-                    "status": "success",
-                    "code": 1,
-                    "data": {
-                        "id": "12345",
-                        "email": "user@example.com",
-                        "surname": "Иванов",
-                        "name": "Иван",
-                        "patronymic": null
-                    }
-                }
+{
+    "status": "success",
+    "code": 1,
+    "data": {
+        "id": "12345",
+        "email": "user@example.com",
+        "surname": "Иванов",
+        "name": "Иван",
+        "patronymic": null
+    }
+}
                     </div>
 
                     <h4>Пример ответа при отсутствии пользователя:</h4>
                     <div class="code-block">
-                {
-                    "status": "error",
-                    "code": 1,
-                    "message": "Пользователь не найден"
-                }
+{
+    "status": "error",
+    "code": 1,
+    "message": "Пользователь не найден"
+}
                     </div>
+
+                    <h4>Пример ответа при блокировке пользователя: <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                    </div>                    
                 </div>
 
                 
@@ -3426,41 +3509,32 @@ python3 server.py --status
 
                     <h4>Пример запроса:</h4>
                     <div class="code-block">
-                {
-                    "phone": "+79123456789",
-                    "password": "user_password_123"
-                }
+{
+    "phone": "+79123456789",
+    "password": "user_password_123"
+}
                     </div>
 
                     <h4>Пример успешного ответа:</h4>
                     <div class="code-block">
-                {
-                    "status": "success",
-                    "code": 3,
-                    "data": {
-                        "id": 4,
-                        "phone": "+79123456789",
-                        "email": "test@mail.com"
-                    }
-                }
+{
+    "status": "success",
+    "code": 3,
+    "data": {
+        "id": 4,
+        "phone": "+79123456789",
+        "email": "test@mail.com"
+    }
+}
                     </div>
 
                     <h4>Пример ответа при неверных данных:</h4>
                     <div class="code-block">
-                {
-                    "status": "success",
-                    "code": 1,
-                    "message": "Неверный телефон или пароль"
-                }
-                    </div>
-
-                    <h4>Пример ответа при блокировке учетной записи:</h4>
-                    <div class="code-block">
-                {
-                    "status": "success",
-                    "code": 2,
-                    "message": "Учетная запись временно заблокирована. Попробуйте вход позже."
-                }
+{
+    "status": "success",
+    "code": 1,
+    "message": "Неверный телефон или пароль"
+}
                     </div>
 
                     <h4>Коды ответа:</h4>
@@ -3491,6 +3565,18 @@ python3 server.py --status
                         <p><strong>Примечание:</strong> Пароль хешируется на сервере с использованием SHA-256 перед проверкой в базе данных.</p>
                         <p><strong>Примечание:</strong> Логика подсчета неудачных попыток входа и принятия решения о блокировке полностью находится на стороне SQL Server.</p>
                     </div>
+
+                    <h4>Пример ответа при блокировке пользователя: <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                    </div>                    
                 </div>
                 <!-- ========== /user/mailing ========== -->
                 <div id="user-mailing">
@@ -3573,6 +3659,18 @@ python3 server.py --status
     "message": "Параметр user_id должен быть числом"
 }
                     </div>
+
+                    <h4>Пример ответа при блокировке пользователя: <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                    </div>                    
                 </div>
 
                 <!-- ========== /user/update ========== -->
@@ -3716,6 +3814,17 @@ python3 server.py --status
 {
     "status": "error",
     "message": "Ошибка при обновлении пользователя: [детали ошибки]"
+}
+                    </div>
+                    <h4>Пример ответа при блокировке пользователя: <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></h4>
+                    <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
 }
                     </div>
                 </div>
@@ -3927,9 +4036,11 @@ python3 server.py --status
                     </div>
                 </div>
 
-                <div class="config-section">
+                <div class="config-section" id="endpoint-userblocked-section">
                     <h4>🚫 Блокировка пользователей по эндпоинтам</h4>
-                    <p>Параметр <code>endpoint_userblocked</code> позволяет указать список эндпоинтов, для которых должна применяться локальная блокировка пользователя:</p>
+                    <p>Параметр <code>endpoint_userblocked</code> позволяет указать список эндпоинтов, для которых должна применяться локальная блокировка пользователя.</p>
+                    <p>Если пользователь находится в активной блокировке и текущий endpoint включен в <code>endpoint_userblocked</code>, сервер прерывает обработку запроса до обращения к БД и возвращает специальный ответ с ошибкой <code>USERBLOCKED</code>. Подробный формат ответа описан в разделе <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a>.</p>
+
                     <table class="config-table">
                         <tr>
                             <th>Параметр</th>
@@ -3955,24 +4066,30 @@ python3 server.py --status
                             <td><code>/USER/LOGIN</code>, <code>user/login</code> и <code>/user/login/</code> считаются одним и тем же путем</td>
                             <td>Упрощает конфигурирование и уменьшает риск ошибок в настройке</td>
                         </tr>
+                        <tr>
+                            <td>Ответ при блокировке</td>
+                            <td>Для endpoint-ов из списка сервер может вернуть специальный JSON-ответ о блокировке пользователя</td>
+                            <td>При активной блокировке формируется ответ со статусом <code>error</code>, кодом <code>2</code> и ошибкой <code>USERBLOCKED</code></td>
+                            <td><a href="#userblocked-response-format">Перейти к описанию формата ответа</a></td>
+                        </tr>
                     </table>
                     
                     <h4>Пример конфигурации из кода:</h4>
                     <div class="code-block">
-                "endpoint_userblocked": [
-                    "/user/by-phone",
-                    "/user/update",
-                    "/ticket/list",
-                    "/user/login",
-                    "/document/signed",
-                    "/document/list",
-                    "/user/mailing",
-                    "/payment/set",
-                    "/payment/calculate-distribution",
-                    "/document/load"
-                ]
+"endpoint_userblocked": [
+    "/user/by-phone",
+    "/user/update",
+    "/ticket/list",
+    "/user/login",
+    "/document/signed",
+    "/document/list",
+    "/user/mailing",
+    "/payment/set",
+    "/payment/calculate-distribution",
+    "/document/load"
+]
                     </div>
-                    
+
                     <div class="info-box">
                         <h4>ℹ️ Примечания по блокировке пользователей</h4>
                         <ul>
@@ -3981,9 +4098,80 @@ python3 server.py --status
                             <li>Если endpoint отсутствует в <code>endpoint_userblocked</code>, блокировка пользователя для него не действует</li>
                             <li>Параметр управляет только применением блокировки пользователя, но не заменяет настройку общей безопасности через <code>endpoint_security</code></li>
                             <li>Для специальных эндпоинтов, например <code>/user/update</code>, логика блокировки может учитывать дополнительные условия, реализованные в коде обработчика</li>
+                            <li>При срабатывании блокировки сервер возвращает отдельный ответ формата <code>USERBLOCKED</code>; описание структуры приведено в разделе <a href="#userblocked-response-format">Формат ответа при блокировке пользователя</a></li>
                         </ul>
                     </div>
-                </div>                
+
+                    <div class="info-box" id="userblocked-response-format">
+                        <h4>📄 Формат ответа при блокировке пользователя</h4>
+                        <p>Если endpoint включен в <code>endpoint_userblocked</code> и для пользователя обнаружена активная блокировка, сервер возвращает специальный JSON-ответ, сформированный функцией <code>build_user_blocked_response_payload()</code>. Такой ответ совместим с текущим API и позволяет клиенту явно определить состояние блокировки пользователя.</p>
+
+                        <h4>Структура ответа:</h4>
+                        <div class="code-block">
+{
+    "status": "error",
+    "code": 2,
+    "errorcode": "USERBLOCKED",
+    "message": "Пользователь временно заблокирован",
+    "blocked_until": "2026-07-22T12:00:00",
+    "server_time": "2026-07-22T11:58:30"
+}
+                        </div>
+
+                        <table class="config-table">
+                            <tr>
+                                <th>Поле</th>
+                                <th>Тип</th>
+                                <th>Обязательность</th>
+                                <th>Описание</th>
+                            </tr>
+                            <tr>
+                                <td>status</td>
+                                <td>string</td>
+                                <td>Да</td>
+                                <td>Статус ответа. При блокировке пользователя всегда имеет значение <code>error</code></td>
+                            </tr>
+                            <tr>
+                                <td>code</td>
+                                <td>integer</td>
+                                <td>Да</td>
+                                <td>Код ошибки блокировки пользователя. В текущей реализации используется значение <code>2</code></td>
+                            </tr>
+                            <tr>
+                                <td>errorcode</td>
+                                <td>string</td>
+                                <td>Да</td>
+                                <td>Машиночитаемый код ошибки. При блокировке всегда возвращается <code>USERBLOCKED</code></td>
+                            </tr>
+                            <tr>
+                                <td>message</td>
+                                <td>string</td>
+                                <td>Да</td>
+                                <td>Текстовое описание причины отказа. По умолчанию: <code>Пользователь временно заблокирован</code></td>
+                            </tr>
+                            <tr>
+                                <td>blocked_until</td>
+                                <td>string (ISO datetime)</td>
+                                <td>Нет</td>
+                                <td>Время окончания блокировки в ISO-формате. Поле включается в ответ только если серверу известно время окончания блокировки</td>
+                            </tr>
+                            <tr>
+                                <td>server_time</td>
+                                <td>string (ISO datetime)</td>
+                                <td>Да</td>
+                                <td>Текущее серверное время в момент формирования ответа. Может использоваться клиентом для сравнения с <code>blocked_until</code></td>
+                            </tr>
+                        </table>
+
+                        <h4>Особенности формирования ответа:</h4>
+                        <ul>
+                            <li>Ответ возвращается только для тех эндпоинтов, которые включены в <code>endpoint_userblocked</code></li>
+                            <li>Формирование ответа происходит до выполнения основной бизнес-логики endpoint-а</li>
+                            <li>Если время окончания блокировки неизвестно, поле <code>blocked_until</code> может отсутствовать</li>
+                            <li>Клиентская сторона должна ориентироваться в первую очередь на <code>errorcode = USERBLOCKED</code>, а не только на текст поля <code>message</code></li>
+                        </ul>
+                    </div>
+                </div>
 
                 <div class="config-section">
                     <h4>🔐 Безопасность входа (Login Security)</h4>
@@ -4023,12 +4211,12 @@ python3 server.py --status
                     
                     <h4>Пример конфигурации:</h4>
                     <div class="code-block">
-            "login_security": {
-                "enabled": true,
-                "max_failed_attempts": 5,
-                "check_period_minutes": 1,
-                "allow_successful_login_during_lockout": false
-            }
+"login_security": {
+    "enabled": true,
+    "max_failed_attempts": 5,
+    "check_period_minutes": 1,
+    "allow_successful_login_during_lockout": false
+}
                     </div>
                 </div>
 
