@@ -2337,7 +2337,7 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
 
     # НЕ УДАЛЯТЬ! ЭТО ЗАГЛУШКА
     # query = "EXECUTE [dbo].[USR_Insert] @USR_Phone = ?"
-    query = "EXECUTE [dbo].[USR_Insert_deb_new] @USR_Phone = ?"
+    query = "EXECUTE [dbo].[USR_Insert_V2] @USR_Phone = ?"
     cursor = None
 
     try:
@@ -3219,16 +3219,16 @@ async def db_login(phone: str, hashed_password: str):
     def _execute_login():
         cursor = db_connection.cursor()
         try:
-            """
-            не удалять ! временная заглушка
+            
+            # не удалять ! временная заглушка
+            # cursor.execute(
+            #    "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?",
+            #    phone,
+            #    hashed_password
+            #)
+
             cursor.execute(
-                "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?",
-                phone,
-                hashed_password
-            )
-            """
-            cursor.execute(
-                "EXECUTE [dbo].[USR_Select_ID_deb_block] @USR_Phone = ?, @USR_Password = ?",
+                "EXECUTE [dbo].[USR_Select_ID_V2] @USR_Phone = ?, @USR_Password = ?",
                 phone,
                 hashed_password
             )
@@ -3552,11 +3552,11 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
             print_status("INFO", f"Вызов хранимой процедуры DOC_Select_ID", 
                         f"user_id: {user_id_int}")
         
-        """
-        НЕ УЛАЛЯТЬ ! это заглушка
-        query = "EXECUTE [dbo].[DOC_Select_ID] @USR_ID = ?"
-        """
-        query = "EXECUTE [dbo].[DOC_Select_ID_deb_json] @USR_ID = ?"        
+        
+        # НЕ УЛАЛЯТЬ ! это заглушка
+        # query = "EXECUTE [dbo].[DOC_Select_ID] @USR_ID = ?"
+        
+        query = "EXECUTE [dbo].[DOC_Select_ID_V2] @USR_ID = ?"        
         cursor = db_connection.cursor()
         
         # Устанавливаем таймаут выполнения (30 секунд)
