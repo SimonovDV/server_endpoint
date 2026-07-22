@@ -7099,7 +7099,8 @@ async def get_user_by_phone(request):
                     "email": result.get("email"),
                     "surname": result.get("surname"),
                     "name": result.get("name"),
-                    "patronymic": result.get("patronymic")
+                    "patronymic": result.get("patronymic"),
+                    "is_password_set": is_password_set
                 }
             },
             status=200
