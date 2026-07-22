@@ -71,6 +71,7 @@ from collections import deque
 
 
 
+
 # --- Глобальные переменные и конфигурация ---
 SERVER_INFO = {
     "server_name": "Защищенный сервер обмена данными",
@@ -1250,75 +1251,96 @@ async def load_public_key():
         raise
 
 
-async def verify_client_signature(signature: str, token: str) -> bool:
+async def verify_client_signature(signature: str, token: str) -> dict:
     """
     Название: verify_client_signature
     Назначение: Асинхронная проверка цифровой подписи клиента с использованием приватного ключа сервера
     Описание: Расшифровывает подпись приватным ключом сервера и проверяет формат <токен>.<время_истечения>
     Принцип работы: Декодирует Base64 подпись, расшифровывает приватным ключом сервера, проверяет формат и срок действия
-    Входящие параметры: 
+    Входящие параметры:
         signature - Base64-кодированная подпись из заголовка Signature
         token - токен авторизации из заголовка Token
-    Исходящие параметры: bool - True если подпись валидна, False в противном случае
+    Исходящие параметры:
+        dict - результат проверки:
+            {
+                "ok": bool,
+                "message": str,
+                "reason": str,
+                "details": dict
+            }
     """
     if not signature:
         if verbose_mode:
-            print_status("ERROR", f"Отсутствует подпись", f"signature={bool(signature)}")
-        return False
-    
-    # Загружаем приватный ключ сервера
+            print_status("ERROR", "Отсутствует подпись", f"signature={bool(signature)}")
+        return {
+            "ok": False,
+            "message": "Отсутствует подпись",
+            "reason": "missing_signature",
+            "details": {}
+        }
+
     server_private_key = await load_server_private_key()
     if not server_private_key:
         if verbose_mode:
-            print_status("ERROR", f"Не удалось загрузить приватный ключ сервера")
-        return False
-    
+            print_status("ERROR", "Не удалось загрузить приватный ключ сервера")
+        return {
+            "ok": False,
+            "message": "Не удалось загрузить приватный ключ сервера",
+            "reason": "private_key_not_loaded",
+            "details": {}
+        }
+
     loop = asyncio.get_event_loop()
-    
+
     def _verify():
         try:
             if verbose_mode:
                 print("=" * 60)
                 print("НАЧАЛО ПРОВЕРКИ ЦИФРОВОЙ ПОДПИСИ КЛИЕНТА")
                 print("=" * 60)
-                print(f"Входные параметры:")
+                print("Входные параметры:")
                 print(f"  - Токен: {token}")
                 print(f"  - Подпись (Base64): {signature}")
                 print(f"  - Длина подписи: {len(signature)} символов")
                 print(f"  - Путь к приватному ключу сервера: {config.server_private_key_path}")
-            
-            # Декодируем Base64 подпись
-            signature_bytes = base64.b64decode(signature)
-            
-            if verbose_mode:
-                print_status("OK", f"Подпись декодирована из Base64")
-                print(f"  - Длина подписи в байтах: {len(signature_bytes)}")
-                print(f"  - Подпись (hex): {signature_bytes.hex()}")
-            
-            # Расшифровываем подпись приватным ключом сервера
-            if verbose_mode:
-                print(f"Расшифровка подписи приватным ключом сервера...")
-                print(f"  Используем PKCS1v15 padding (совместимо с PHP openssl_public_encrypt)")
-            
-            # Для совместимости с PHP openssl_public_encrypt используем PKCS1v15 padding
+
             try:
-                # PHP openssl_public_encrypt по умолчанию использует OPENSSL_PKCS1_PADDING
-                # что соответствует PKCS1v15 в Python cryptography
+                signature_bytes = base64.b64decode(signature)
+            except Exception as e:
+                if verbose_mode:
+                    print_status("ERROR", "Подпись не удалось декодировать из Base64", str(e))
+                return {
+                    "ok": False,
+                    "message": "Подпись не является корректным Base64",
+                    "reason": "invalid_base64",
+                    "details": {"error": str(e)}
+                }
+
+            if verbose_mode:
+                print_status("OK", "Подпись декодирована из Base64")
+                print(f"  - Длина подписи в байтах: {len(signature_bytes)}")
+
+            decrypted_data = None
+            used_algorithm = None
+
+            if verbose_mode:
+                print("Расшифровка подписи приватным ключом сервера...")
+                print("  Используем PKCS1v15 padding (совместимо с tester_4.py / PHP openssl_public_encrypt)")
+
+            try:
                 decrypted_data = server_private_key.decrypt(
                     signature_bytes,
                     padding.PKCS1v15()
                 )
-                
+                used_algorithm = "RSA-PKCS1v15"
+
                 if verbose_mode:
-                    print_status("OK", f"Успешная расшифровка с RSA-PKCS1v15")
-                    print(f"  (совместимо с PHP openssl_public_encrypt)")
-                    
+                    print_status("OK", "Успешная расшифровка с RSA-PKCS1v15")
             except Exception as e:
                 if verbose_mode:
-                    print_status("ERROR", f"Расшифровка с RSA-PKCS1v15 не удалась", str(e))
-                    print(f"  Пробуем альтернативные методы...")
-                
-                # Если PKCS1v15 не сработал, пробуем другие padding схемы
+                    print_status("ERROR", "Расшифровка с RSA-PKCS1v15 не удалась", str(e))
+                    print("  Пробуем альтернативные методы...")
+
                 padding_methods = [
                     ("RSA-OAEP-SHA256", padding.OAEP(
                         mgf=padding.MGF1(algorithm=hashes.SHA256()),
@@ -1331,7 +1353,9 @@ async def verify_client_signature(signature: str, token: str) -> bool:
                         label=None
                     )),
                 ]
-                
+
+                last_error = str(e)
+
                 for alg_name, padding_scheme in padding_methods:
                     try:
                         decrypted_data = server_private_key.decrypt(
@@ -1343,133 +1367,204 @@ async def verify_client_signature(signature: str, token: str) -> bool:
                             print_status("OK", f"Успешная расшифровка с {alg_name}")
                         break
                     except Exception as e2:
+                        last_error = str(e2)
                         if verbose_mode:
                             print_status("ERROR", f"{alg_name} расшифровка не удалась", str(e2))
                         continue
-                else:
-                    # Если ни один метод не сработал
-                    if verbose_mode:
-                        print_status("ERROR", f"Не удалось расшифровать подпись ни одним методом")
-                    return False
 
-            # Преобразуем расшифрованные данные в строку
+                if decrypted_data is None:
+                    if verbose_mode:
+                        print_status("ERROR", "Не удалось расшифровать подпись ни одним методом")
+                    return {
+                        "ok": False,
+                        "message": "Не удалось расшифровать подпись. Проверьте соответствие public_server.pem/private_server.pem",
+                        "reason": "decrypt_failed",
+                        "details": {
+                            "private_key_path": config.server_private_key_path,
+                            "last_error": last_error
+                        }
+                    }
+
             try:
                 decrypted_text = decrypted_data.decode('utf-8')
                 if verbose_mode:
                     print(f"Расшифрованный текст: {decrypted_text}")
             except UnicodeDecodeError:
                 if verbose_mode:
-                    print_status("ERROR", f"Не удалось декодировать расшифрованные данные как UTF-8", 
-                                data_lines=[
-                                    f"Данные (hex): {decrypted_data.hex()}",
-                                    f"Данные (raw): {decrypted_data}"
-                                ])
-                return False
-            
-            # Проверяем формат: токен.время_истечения
+                    print_status(
+                        "ERROR",
+                        "Не удалось декодировать расшифрованные данные как UTF-8",
+                        data_lines=[
+                            f"Данные (hex): {decrypted_data.hex()}",
+                            f"Алгоритм: {used_algorithm}"
+                        ]
+                    )
+                return {
+                    "ok": False,
+                    "message": "Расшифрованные данные не являются UTF-8 строкой",
+                    "reason": "invalid_utf8",
+                    "details": {
+                        "algorithm": used_algorithm
+                    }
+                }
+
             if '.' not in decrypted_text:
                 if verbose_mode:
-                    print_status("ERROR", f"Неверный формат расшифрованных данных: отсутствует разделитель '.'",
-                                data_lines=[f"Полученные данные: {decrypted_text}"])
-                return False
-            
+                    print_status(
+                        "ERROR",
+                        "Неверный формат расшифрованных данных: отсутствует разделитель '.'",
+                        data_lines=[f"Полученные данные: {decrypted_text}"]
+                    )
+                return {
+                    "ok": False,
+                    "message": "Неверный формат подписи. Ожидается <token>.<expiry>",
+                    "reason": "invalid_format",
+                    "details": {
+                        "decrypted_text": decrypted_text
+                    }
+                }
+
             parts = decrypted_text.split('.', 1)
             if len(parts) != 2:
                 if verbose_mode:
-                    print_status("ERROR", f"Неверный формат расшифрованных данных: ожидается 2 части, получено {len(parts)}",
-                                data_lines=[f"Полученные данные: {decrypted_text}"])
-                return False
-            
+                    print_status(
+                        "ERROR",
+                        f"Неверный формат расшифрованных данных: ожидается 2 части, получено {len(parts)}",
+                        data_lines=[f"Полученные данные: {decrypted_text}"]
+                    )
+                return {
+                    "ok": False,
+                    "message": "Неверный формат подписи. Ожидается 2 части",
+                    "reason": "invalid_parts_count",
+                    "details": {
+                        "decrypted_text": decrypted_text
+                    }
+                }
+
             decrypted_token, expiry_str = parts
-            
-            # Проверяем токен
+
             if decrypted_token != token:
                 if verbose_mode:
-                    print_status("ERROR", f"Несовпадение токенов:",
-                                data_lines=[
-                                    f"Ожидаемый: {token}",
-                                    f"Полученный: {decrypted_token}"
-                                ])
-                return False
-            
+                    print_status(
+                        "ERROR",
+                        "Несовпадение токенов",
+                        data_lines=[
+                            f"Ожидаемый: {token}",
+                            f"Полученный: {decrypted_token}"
+                        ]
+                    )
+                return {
+                    "ok": False,
+                    "message": "Токен в подписи не совпадает с заголовком Token",
+                    "reason": "token_mismatch",
+                    "details": {
+                        "expected_token": token,
+                        "received_token": decrypted_token
+                    }
+                }
+
             if verbose_mode:
-                print_status("OK", f"Токены совпадают")
-            
-            # Проверяем время истечения
+                print_status("OK", "Токены совпадают")
+
             try:
                 current_time = int(datetime.now().timestamp())
                 current_time_human = datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M:%S')
                 expiry_time = int(expiry_str)
                 expiry_time_human = datetime.fromtimestamp(expiry_time).strftime('%Y-%m-%d %H:%M:%S')
-                
+
                 if verbose_mode:
-                    print(f"Время истечения из подписи:")
+                    print("Время истечения из подписи:")
                     print(f"  - Unix время: {expiry_time}")
                     print(f"  - Человекочитаемо: {expiry_time_human}")
+                    print(f"  - Текущее время: {current_time} ({current_time_human})")
                     print(f"  - Осталось времени: {expiry_time - current_time} секунд")
-                
-                # Проверяем что подпись не просрочена
+
                 if expiry_time < current_time:
                     if verbose_mode:
-                        print_status("ERROR", f"Подпись просрочена:",
-                                    data_lines=[
-                                        f"Текущее время: {current_time} ({current_time_human})",
-                                        f"Время истечения: {expiry_time} ({expiry_time_human})",
-                                        f"Просрочено на: {current_time - expiry_time} секунд"
-                                    ])
-                    return False
-                
-                # Проверяем что подпись не из далекого будущего (например, больше 24 часов)
-                max_future_time = current_time + 24 * 3600  # 24 часа
+                        print_status(
+                            "ERROR",
+                            "Подпись просрочена",
+                            data_lines=[
+                                f"Текущее время: {current_time} ({current_time_human})",
+                                f"Время истечения: {expiry_time} ({expiry_time_human})",
+                                f"Просрочено на: {current_time - expiry_time} секунд"
+                            ]
+                        )
+                    return {
+                        "ok": False,
+                        "message": "Подпись просрочена",
+                        "reason": "expired",
+                        "details": {
+                            "current_time": current_time,
+                            "expiry_time": expiry_time,
+                            "expired_by_seconds": current_time - expiry_time
+                        }
+                    }
+
+                max_future_time = current_time + 24 * 3600
                 if expiry_time > max_future_time:
                     if verbose_mode:
-                        print_status("ERROR", f"Время истечения слишком далеко в будущем:",
-                                    data_lines=[
-                                        f"Текущее время: {current_time} ({current_time_human})",
-                                        f"Время истечения: {expiry_time} ({expiry_time_human})",
-                                        f"Разница: {expiry_time - current_time} секунд",
-                                        f"Максимально допустимо: 86400 секунд (24 часа)"
-                                    ])
-                    return False
-                
-                if verbose_mode:
-                    print_status("OK", f"Время истечения валидно")
-                    print("ПРОВЕРКА ПОДПИСИ УСПЕШНО ЗАВЕРШЕНА")
-                    print(f"  - Результат: ПОДПИСЬ ВАЛИДНА")
-                    print(f"  - Использованный алгоритм: RSA-PKCS1v15")
-                    print(f"  - Осталось времени: {expiry_time - current_time} секунд")
-                    print("=" * 60)
-                
-                return True
-                
-            except ValueError:
-                if verbose_mode:
-                    print_status("ERROR", f"Неверный формат времени истечения", expiry_str)
-                return False
-            
-        except (ValueError, UnicodeDecodeError) as e:
-            if verbose_mode:
-                print_status("ERROR", f"Ошибка формата подписи:",
+                        print_status(
+                            "ERROR",
+                            "Время истечения слишком далеко в будущем",
                             data_lines=[
-                                f"Тип ошибки: {type(e).__name__}",
-                                f"Сообщение: {str(e)}"
-                            ])
-                print("=" * 60)
-            return False
+                                f"Текущее время: {current_time} ({current_time_human})",
+                                f"Время истечения: {expiry_time} ({expiry_time_human})",
+                                f"Разница: {expiry_time - current_time} секунд",
+                                f"Максимально допустимо: 86400 секунд (24 часа)"
+                            ]
+                        )
+                    return {
+                        "ok": False,
+                        "message": "Время истечения подписи слишком далеко в будущем",
+                        "reason": "expiry_too_far",
+                        "details": {
+                            "current_time": current_time,
+                            "expiry_time": expiry_time,
+                            "delta_seconds": expiry_time - current_time
+                        }
+                    }
+
+            except ValueError as e:
+                if verbose_mode:
+                    print_status("ERROR", "Неверный формат времени истечения", str(e))
+                return {
+                    "ok": False,
+                    "message": "Время истечения подписи имеет неверный формат",
+                    "reason": "invalid_expiry",
+                    "details": {
+                        "expiry_str": expiry_str,
+                        "error": str(e)
+                    }
+                }
+
+            if verbose_mode:
+                print_status("OK", f"Подпись валидна ({used_algorithm})")
+
+            return {
+                "ok": True,
+                "message": "Подпись валидна",
+                "reason": "ok",
+                "details": {
+                    "algorithm": used_algorithm,
+                    "expiry_time": expiry_time
+                }
+            }
+
         except Exception as e:
             if verbose_mode:
-                print_status("ERROR", f"Неожиданная ошибка при проверке подписи:",
-                            data_lines=[
-                                f"Тип ошибки: {type(e).__name__}",
-                                f"Сообщение: {str(e)}"
-                            ])
-                import traceback
-                print("  Трассировка:")
-                traceback.print_exc()
-                print("=" * 60)
-            return False
-    
+                print_status("ERROR", "Критическая ошибка проверки подписи", str(e))
+            return {
+                "ok": False,
+                "message": f"Внутренняя ошибка проверки подписи: {str(e)}",
+                "reason": "internal_error",
+                "details": {
+                    "error": str(e)
+                }
+            }
+
     return await loop.run_in_executor(None, _verify)
+
 
 async def load_server_private_key():
     """
@@ -1819,17 +1914,28 @@ async def _validate_signature(request: web.Request, token: str) -> None:
         raise web.HTTPForbidden(text=json.dumps({
             "status": "error",
             "message": "Требуется заголовок Signature"
-        }), content_type='application/json')
-    
-    # Асинхронная проверка подписи
-    is_signature_valid = await verify_client_signature(signature, token)
-    
-    if not is_signature_valid:
+        }, ensure_ascii=False), content_type='application/json')
+
+    verification_result = await verify_client_signature(signature, token)
+
+    if not verification_result.get("ok"):
+        error_message = verification_result.get("message", "Невалидная или просроченная подпись")
+        error_reason = verification_result.get("reason", "unknown")
+        error_details = verification_result.get("details", {})
+
+        if verbose_mode:
+            print_status(
+                "ERROR",
+                f"Проверка подписи не пройдена: {error_reason}",
+                data_lines=[f"{k}: {v}" for k, v in error_details.items()]
+            )
+
         raise web.HTTPForbidden(text=json.dumps({
             "status": "error",
-            "message": "Невалидная или просроченная подпись"
-        }), content_type='application/json')
-
+            "message": error_message,
+            "reason": error_reason,
+            "details": error_details
+        }, ensure_ascii=False), content_type='application/json')
 def _get_optional_token(request: web.Request) -> str:
     """
     Название: _get_optional_token
