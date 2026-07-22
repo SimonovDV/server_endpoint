@@ -562,11 +562,31 @@ def parse_arguments():
     )
     return parser.parse_args()
 
+def print_launch_parameters(args, tester):
+    print("\n" + "=" * 80)
+    print("ПАРАМЕТРЫ ТЕКУЩЕГО ЗАПУСКА")
+    print("=" * 80)
+    print(f"config           : {args.config}")
+    print(f"keys_dir (arg)   : {args.keys_dir}")
+    print(f"script_dir       : {tester.script_dir}")
+    print(f"base_dir         : {tester.base_dir}")
+    print(f"launch_dir       : {tester.launch_dir}")
+    print(f"source_keys_dir  : {tester.source_keys_dir}")
+    print(f"work_keys_dir    : {tester.keys_dir}")
+    print(f"files_dir        : {tester.files_dir}")
+    print(f"server_scheme    : {tester.server_scheme}")
+    print(f"server_ip        : {tester.server_ip}")
+    print(f"server_port      : {tester.server_port}")
+    print(f"server_url       : {tester.SERVER_URL}")
+    print(f"token            : {tester.TOKEN}")
+    print(f"timeout          : {tester.request_timeout}")
+    print("=" * 80)
 
 def main():
     args = parse_arguments()
     tester = SecureDataExchangeTester(config_path=args.config, keys_dir=args.keys_dir)
     tester.print_startup_help()
+    print_launch_parameters(args, tester)
     tester.output_mode = tester.ask_output_mode()
     tester.show_menu()
 
