@@ -3556,7 +3556,7 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
         # НЕ УЛАЛЯТЬ ! это заглушка
         # query = "EXECUTE [dbo].[DOC_Select_ID] @USR_ID = ?"
         
-        query = "EXECUTE [dbo].[DOC_Select_ID_V2] @USR_ID = ?"        
+        query = "EXECUTE [dbo].[DOC_Select_ID_V2] @USR_ID = ?"
         cursor = db_connection.cursor()
         
         # Устанавливаем таймаут выполнения (30 секунд)
@@ -3568,12 +3568,11 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
         # Получаем результаты
         results = []
         try:
-            if cursor.description:  # Если есть возвращаемые колонки
+            if cursor.description:
                 columns = [column[0] for column in cursor.description]
                 for row in cursor.fetchall():
                     results.append(dict(zip(columns, row)))
         except pyodbc.ProgrammingError:
-            # Ожидаемая ошибка - нет данных для чтения
             if verbose_mode:
                 print_status("INFO", f"Процедура не возвращает данные для чтения")
             pass
@@ -3612,18 +3611,15 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
                     parsed_data = json.loads(json_data)
                     
                     if isinstance(parsed_data, list):
-                        # Прямой список документов
                         documents_list = parsed_data
                         if verbose_mode:
                             print_status("OK", f"Успешно распарсено документов", str(len(documents_list)))
                             
-                            # Выводим информацию о первом документе для отладки
                             if documents_list and len(documents_list) > 0:
                                 first_doc = documents_list[0]
                                 print(f"  Первый документ: {first_doc.get('ID', 'N/A')} - {first_doc.get('Name', 'N/A')}")
                     
                     elif isinstance(parsed_data, dict):
-                        # Если вернулся словарь, проверяем есть ли в нем поле items или documents
                         if 'items' in parsed_data and isinstance(parsed_data['items'], list):
                             documents_list = parsed_data['items']
                             if verbose_mode:
@@ -3633,7 +3629,6 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
                             if verbose_mode:
                                 print_status("OK", f"Успешно распарсено документов из поля 'documents'", str(len(documents_list)))
                         else:
-                            # Если это одиночный документ, добавляем в список
                             documents_list = [parsed_data]
                             if verbose_mode:
                                 print_status("OK", f"Получен одиночный документ")
@@ -3658,7 +3653,7 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
         # Преобразуем структуру данных в требуемый формат
         formatted_documents = []
         for doc in documents_list:
-            formatted_doc = doc.copy()  # или dict(doc)
+            formatted_doc = doc.copy()
             formatted_documents.append(formatted_doc)
         
         if verbose_mode:
@@ -3673,7 +3668,6 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
         if "timeout" in str(e).lower():
             print_status("ERROR", f"Таймаут выполнения хранимой процедуры DOC_Select_ID", 
                         f"user_id: {user_id}")
-            # Откатываем транзакцию при таймауте
             try:
                 db_connection.rollback()
             except:
@@ -7615,7 +7609,7 @@ async def get_documentlist(request):
         if blocked_response is not None:
             return blocked_response
 
-    result = await db_documentlist(data)
+    result = await db_documentlist(user_id)
 
     return web.json_response(
         {"status": "success", "code": 0, "data": result},
