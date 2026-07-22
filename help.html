@@ -2690,6 +2690,7 @@ python3 server.py --status
                 <div id="document-load">
                     <div class="endpoint">
                         <span class="method">POST</span> /document/load
+                        <span class="user_blocked" data="/document/load">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Сохранение документа в облачное хранилище и запись метаданных в базу данных.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature')</p>
@@ -2772,6 +2773,7 @@ python3 server.py --status
                 <div id="document-signed">
                     <div class="endpoint">
                         <span class="method">POST</span> /document/signed
+                        <span class="user_blocked" data="/document/signed">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Обновление статуса подписания документа.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature')</p>
@@ -2853,6 +2855,7 @@ python3 server.py --status
                 <div id="payment-set">
                     <div class="endpoint">
                         <span class="method">POST</span> /payment/set
+                        <span class="user_blocked" data="/payment/set">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Эндпоинт принимает данные о платежах и передает их в базу данных для обработки.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature')</p>
@@ -2960,6 +2963,7 @@ python3 server.py --status
                 <div id="payment-calculate-distribution">
                     <div class="endpoint">
                         <span class="method">POST</span> /payment/calculate-distribution
+                        <span class="user_blocked" data="/payment/calculate-distribution">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Расчет распределения платежа по залоговым билетам и их предметам. Эндпоинт вызывает хранимую процедуру usp_CalculatePaymentDistribution для распределения суммы платежа между залоговыми билетами и их предметами с учетом стоимости каждого предмета.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature')</p>
@@ -3191,6 +3195,7 @@ python3 server.py --status
                 <div id="ticket-list">
                     <div class="endpoint">
                         <span class="method">POST</span> /ticket/list
+                        <span class="user_blocked" data="/ticket/list">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Получение списка залоговых билетов пользователя. Эндпоинт вызывает хранимую процедуру ZbTickets_Json для получения данных о залоговых билетах в формате JSON.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature')</p>
@@ -3299,6 +3304,7 @@ python3 server.py --status
                 <div id="user-by-phone">
                     <div class="endpoint">
                         <span class="method">POST</span> /user/by-phone
+                        <span class="user_blocked" data="/user/by-phone">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Поиск информации о пользователе в базе данных по номеру телефона. Эндпоинт выполняет нормализацию номера телефона (удаление нецифровых символов, приведение к 10-значному формату) и получение данных пользователя через хранимые процедуры.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature')</p>
@@ -3378,6 +3384,7 @@ python3 server.py --status
                 <div id="user-login">
                     <div class="endpoint">
                         <span class="method">POST</span> /user/login
+                        <span class="user_blocked" data="/user/login">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Аутентификация пользователя по телефону и паролю.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature').</p>
@@ -3489,6 +3496,7 @@ python3 server.py --status
                 <div id="user-mailing">
                     <div class="endpoint">
                         <span class="method">POST</span> /user/mailing
+                        <span class="user_blocked" data="/user/mailing">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Управление согласием на email рассылку пользователя.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature')</p>
@@ -3571,6 +3579,7 @@ python3 server.py --status
                 <div id="user-update">
                     <div class="endpoint">
                         <span class="method">POST</span> /user/update
+                        <span class="user_blocked" data="/user/update">включена блокировка пользователя</span>
                     </div>
                     <p><strong>Назначение:</strong> Обновление данных пользователя в базе данных. Эндпоинт вызывает хранимую процедуру USR_Update для изменения email и пароля пользователя по его идентификатору.</p>
                     <p><strong>Уровень безопасности:</strong> Требует токен и подпись (уровень 'signature')</p>
@@ -7164,7 +7173,7 @@ function normalizeEndpointPath(path) {
     return String(path).trim().replace(/^\/+|\/+$/g, '').toLowerCase();
 }
 
-function applyUserBlockedBadges() {
+async function applyUserBlockedBadges() {
     const badgeElements = document.querySelectorAll('.user_blocked');
 
     if (!badgeElements.length) {
