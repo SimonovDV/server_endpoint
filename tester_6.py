@@ -27,10 +27,12 @@ class SecureDataExchangeTester:
     - интерактивное изменение настроек подключения;
     - работа с ключами и генерация подписи.
 
-    Тесты в главном меню расположены строго в порядке со скриншота.
+    Добавлено:
+    - аргумент запуска --keys-dir для указания каталога с .pem ключами;
+    - по умолчанию каталог ключей: ./key относительно каталога запуска.
     """
 
-    def __init__(self, config_path=None):
+    def __init__(self, config_path=None, keys_dir=None):
         self.default_server_ip = "192.168.0.19"
         self.default_server_port = 8000
         self.default_scheme = "http"
@@ -47,11 +49,14 @@ class SecureDataExchangeTester:
 
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else self.script_dir
-        self.keys_dir = os.path.join(self.base_dir, "keys")
+        self.launch_dir = os.getcwd()
+
+        self.source_keys_dir = os.path.abspath(keys_dir) if keys_dir else os.path.join(self.launch_dir, "key")
+        self.keys_dir = self.source_keys_dir
         self.files_dir = os.path.join(self.base_dir, "files")
         self.temp_keys_dir = None
 
-        os.makedirs(self.keys_dir, exist_ok=True)
+        os.makedirs(self.source_keys_dir, exist_ok=True)
         os.makedirs(self.files_dir, exist_ok=True)
 
         self.load_settings_from_json(config_path)
@@ -77,16 +82,15 @@ class SecureDataExchangeTester:
                     pass
 
     def copy_keys_to_temp(self):
-        source_keys_dir = os.path.join(self.base_dir, "keys")
-        if not os.path.exists(source_keys_dir):
+        if not os.path.exists(self.source_keys_dir):
             return False
 
         copied = 0
-        for file_name in os.listdir(source_keys_dir):
+        for file_name in os.listdir(self.source_keys_dir):
             if file_name.endswith('.pem'):
                 try:
                     shutil.copy2(
-                        os.path.join(source_keys_dir, file_name),
+                        os.path.join(self.source_keys_dir, file_name),
                         os.path.join(self.temp_keys_dir, file_name)
                     )
                     copied += 1
@@ -95,7 +99,7 @@ class SecureDataExchangeTester:
         return copied > 0
 
     def ensure_public_key(self):
-        public_key_path = os.path.join(self.base_dir, "keys", "public_server.pem")
+        public_key_path = os.path.join(self.source_keys_dir, "public_server.pem")
         if os.path.exists(public_key_path):
             return
 
@@ -179,10 +183,14 @@ class SecureDataExchangeTester:
         print("Краткая инструкция запуска:")
         print(f"  python {script_name}")
         print(f"  python {script_name} config.json")
+        print(f"  python {script_name} --keys-dir ./key")
+        print(f"  python {script_name} config.json --keys-dir D:/pem")
         print("\nПараметры запуска:")
-        print("  config.json  - необязательный путь к JSON-файлу конфигурации")
+        print("  config.json         - необязательный путь к JSON-файлу конфигурации")
+        print("  --keys-dir PATH     - необязательный путь к каталогу с .pem ключами")
         print("\nДополнительно:")
-        print(f"  - каталог ключей: {self.keys_dir}")
+        print(f"  - исходный каталог ключей: {self.source_keys_dir}")
+        print(f"  - рабочий каталог ключей: {self.keys_dir}")
         print(f"  - каталог файлов: {self.files_dir}")
         if self.config_path:
             print(f"  - загружена конфигурация: {self.config_path}")
@@ -198,6 +206,8 @@ class SecureDataExchangeTester:
         print(f"Токен: {self.TOKEN}")
         print(f"Таймаут: {self.request_timeout} сек.")
         print(f"Режим вывода: {'краткий' if self.output_mode == 0 else 'полный'}")
+        print(f"Каталог исходных ключей: {self.source_keys_dir}")
+        print(f"Рабочий каталог ключей: {self.keys_dir}")
         print("-" * 60)
 
     def configure_connection_interactive(self):
@@ -223,7 +233,7 @@ class SecureDataExchangeTester:
         try:
             public_key_path = os.path.join(self.keys_dir, "public_server.pem")
             if not os.path.exists(public_key_path):
-                print("Ошибка: файл публичного ключа не найден.")
+                print(f"Ошибка: файл публичного ключа не найден: {public_key_path}")
                 return None
 
             with open(public_key_path, 'rb') as f:
@@ -505,6 +515,7 @@ class SecureDataExchangeTester:
             print(f"Режим вывода: {'краткий' if self.output_mode == 0 else 'полный'}")
             if self.config_path:
                 print(f"Файл конфигурации: {self.config_path}")
+            print(f"Каталог ключей: {self.source_keys_dir}")
             print("\nДоступные тесты:\n")
 
             for index, (title, _) in enumerate(menu_items, start=1):
@@ -543,12 +554,18 @@ def parse_arguments():
         default=None,
         help='Необязательный путь к JSON-файлу конфигурации сервера'
     )
+    parser.add_argument(
+        '--keys-dir',
+        dest='keys_dir',
+        default=None,
+        help='Необязательный путь к каталогу с .pem ключами; по умолчанию используется ./key'
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_arguments()
-    tester = SecureDataExchangeTester(config_path=args.config)
+    tester = SecureDataExchangeTester(config_path=args.config, keys_dir=args.keys_dir)
     tester.print_startup_help()
     tester.output_mode = tester.ask_output_mode()
     tester.show_menu()
