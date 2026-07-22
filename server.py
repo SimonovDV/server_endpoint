@@ -2659,6 +2659,12 @@ async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
                     user_data["surname"] = user_data.get("surname") or user_data.get("USR_Surname")
                     user_data["name"] = user_data.get("name") or user_data.get("USR_Name")
                     user_data["patronymic"] = user_data.get("patronymic") or user_data.get("USR_Patronymic")
+                    # работаем со сторкой ниже
+                    raw_password = user_data.get("password")
+                    if raw_password is None:
+                        raw_password = user_data.get("USR_Password")
+
+                    user_data["is_password_set"] = bool(str(raw_password).strip()) if raw_password is not None else False
 
                     if verbose_mode:
                         print_status("OK", "Найден пользователь",
@@ -2693,6 +2699,12 @@ async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
         fallback_user["surname"] = fallback_user.get("surname") or fallback_user.get("USR_Surname")
         fallback_user["name"] = fallback_user.get("name") or fallback_user.get("USR_Name")
         fallback_user["patronymic"] = fallback_user.get("patronymic") or fallback_user.get("USR_Patronymic")
+        # работаем со сторкой ниже
+        raw_password = fallback_user.get("password")
+        if raw_password is None:
+            raw_password = fallback_user.get("USR_Password")
+
+        fallback_user["is_password_set"] = bool(str(raw_password).strip()) if raw_password is not None else False
 
         if verbose_mode:
             print_status("OK", "Найден пользователь через rowset",
@@ -7077,10 +7089,11 @@ async def get_user_by_phone(request):
     result = await db_user_by_phone(normalized_phone)
 
     if result:
+        is_password_set = bool(result.get("is_password_set"))
         return web.json_response(
             {
                 "status": "success",
-                "code": 1,
+                "code": 2 if is_password_set else 1,
                 "data": {
                     "id": str(result.get("id") or result.get("user_id") or ""),
                     "email": result.get("email"),
@@ -7095,7 +7108,7 @@ async def get_user_by_phone(request):
     return web.json_response(
         {
             "status": "error",
-            "code": 1,
+            "code": 3,
             "message": "Пользователь не найден"
         },
         status=200
