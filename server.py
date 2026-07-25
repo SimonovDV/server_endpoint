@@ -2109,15 +2109,16 @@ async def build_block_primary_key(user_id=None, phone=None, normalized_phone=Non
             else:
                 phone_for_lookup = normalize_phone(phone_value)
 
-            user_data = await db_user_by_phone(phone_for_lookup)
-            if user_data:
-                raw_user_id = (
-                    user_data.get("id")
-                    or user_data.get("user_id")
-                    or user_data.get("USR_Id")
-                )
-                if raw_user_id is not None and str(raw_user_id).strip() != "":
-                    resolved_user_id = int(raw_user_id)
+                resolved_user_id = await db_get_user_id_by_phone(phone_for_lookup)
+                if resolved_user_id is not None and verbose_mode:
+                    print_status(
+                        "INFO",
+                        "build_block_primary_key: user_id вычислен по телефону",
+                        data_lines=[
+                            f"phone={phone_for_lookup!r}",
+                            f"resolved_user_id={resolved_user_id!r}"
+                        ]
+                    )
 
                     if verbose_mode:
                         print_status(
@@ -2555,7 +2556,95 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
                 cursor.close()
         except Exception:
             pass
-        
+
+
+async def db_get_user_id_by_phone(phone: str) -> Optional[int]:
+    """
+    Название: db_get_user_id_by_phone
+    Назначение: Получение только идентификатора пользователя по номеру телефона
+    Описание:
+        Нормализует телефон и вызывает db_usr_insert(...), которая выполняет
+        хранимую процедуру USR_Insert_V2 и возвращает user_id.
+        Используется в служебных местах, где нужен только user_id,
+        например при построении ключа блокировки, без вызова USR_Select
+        и без получения полной карточки пользователя.
+    Входящие параметры:
+        phone - номер телефона пользователя
+    Исходящие параметры:
+        Optional[int] - идентификатор пользователя или None, если определить не удалось
+    """
+    if not db_connection:
+        raise Exception("База данных не доступна")
+
+    if phone is None:
+        return None
+
+    try:
+        if isinstance(phone, str) and phone.isdigit() and len(phone) == 10:
+            normalized_phone = phone
+        else:
+            normalized_phone = normalize_phone(phone)
+
+        if not normalized_phone:
+            return None
+
+        if verbose_mode:
+            print_status(
+                "INFO",
+                "db_get_user_id_by_phone: попытка определить user_id",
+                data_lines=[f"phone={phone!r}", f"normalized_phone={normalized_phone!r}"]
+            )
+
+        user_id = await db_usr_insert(normalized_phone)
+
+        if user_id is None:
+            if verbose_mode:
+                print_status(
+                    "INFO",
+                    "db_get_user_id_by_phone: user_id не найден",
+                    data_lines=[f"normalized_phone={normalized_phone!r}"]
+                )
+            return None
+
+        try:
+            user_id = int(user_id)
+        except Exception:
+            if verbose_mode:
+                print_status(
+                    "ERROR",
+                    "db_get_user_id_by_phone: не удалось преобразовать user_id к int",
+                    data_lines=[f"user_id={user_id!r}", f"normalized_phone={normalized_phone!r}"]
+                )
+            return None
+
+        if user_id <= 0:
+            if verbose_mode:
+                print_status(
+                    "INFO",
+                    "db_get_user_id_by_phone: получен неположительный user_id",
+                    data_lines=[f"user_id={user_id!r}", f"normalized_phone={normalized_phone!r}"]
+                )
+            return None
+
+        if verbose_mode:
+            print_status(
+                "OK",
+                "db_get_user_id_by_phone: user_id успешно определен",
+                data_lines=[f"user_id={user_id!r}", f"normalized_phone={normalized_phone!r}"]
+            )
+
+        return user_id
+
+    except Exception as e:
+        if verbose_mode:
+            print_status(
+                "ERROR",
+                "db_get_user_id_by_phone: ошибка при определении user_id",
+                data_lines=[f"phone={phone!r}", f"error={str(e)}"]
+            )
+        return None
+
+            
 async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
     """
     Название: db_user_by_phone
