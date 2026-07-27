@@ -4037,7 +4037,106 @@ async def get_useremailing(request: web.Request) -> web.Response:
         status=200
     )
 
-    
+
+async def db_useremailing(user_id: int, consent_to_mailing: bool) -> bool:
+    """
+    Название: db_useremailing
+    Назначение: Обновление согласия на email рассылку пользователя через хранимую процедуру
+    Описание: Вызывает хранимую процедуру USR_Update_consent_to_mailing для обновления настроек рассылки
+    Принцип работы: Вызывает хранимую процедуру с параметрами user_id и consent_to_mailing, проверяет результат
+    Входящие параметры:
+        user_id - идентификатор пользователя
+        consent_to_mailing - согласие на рассылку (True - получено, False - отказано)
+    Исходящие параметры: bool - True если операция успешна, False если USR_ID = -1
+    """
+    if not db_connection:
+        raise Exception("База данных не доступна")
+
+    try:
+        query = "EXECUTE [dbo].[USR_Update_consent_to_mailing] @USR_ID = ?, @USR_consent_to_mailing = ?"
+
+        if verbose_mode:
+            consent_text = "согласие получено" if consent_to_mailing else "отказ от рассылки"
+            print_status(
+                "INFO",
+                "Вызов хранимой процедуры USR_Update_consent_to_mailing",
+                f"user_id: {user_id}, consent: {consent_text}"
+            )
+
+        cursor = db_connection.cursor()
+
+        # Устанавливаем таймаут выполнения (30 секунд)
+        cursor.execute("SET LOCK_TIMEOUT 30000")
+
+        # Выполняем хранимую процедуру с параметрами
+        cursor.execute(query, (int(user_id), 1 if consent_to_mailing else 0))
+
+        # Получаем результат
+        result_id = cursor.fetchval()
+
+        # Фиксируем изменения
+        db_connection.commit()
+
+        # Закрываем курсор для освобождения ресурсов
+        cursor.close()
+
+        if verbose_mode:
+            print_status("OK", "Хранимая процедура USR_Update_consent_to_mailing выполнена успешно")
+            print(f"  Получен ID: {result_id}")
+
+        # Обрабатываем результат процедуры
+        if result_id is not None:
+            try:
+                result_id_int = int(result_id)
+
+                if result_id_int == -1:
+                    if verbose_mode:
+                        print_status("ERROR", "Ошибка в хранимой процедуре (ID = -1)")
+                    return False
+                else:
+                    if verbose_mode:
+                        print_status("OK", "Согласие на рассылку успешно обновлено", f"ID: {result_id_int}")
+                    return True
+
+            except (ValueError, TypeError) as e:
+                if verbose_mode:
+                    print_status("ERROR", "Ошибка преобразования результата", str(e))
+                return False
+        else:
+            if verbose_mode:
+                print_status("ERROR", "Процедура не вернула результат")
+            return False
+
+    except pyodbc.OperationalError as e:
+        if "timeout" in str(e).lower():
+            print_status(
+                "ERROR",
+                "Таймаут выполнения хранимой процедуры USR_Update_consent_to_mailing",
+                f"user_id: {user_id}"
+            )
+            try:
+                db_connection.rollback()
+            except Exception:
+                pass
+            raise Exception(f"Таймаут выполнения операции обновления согласия на рассылку: {str(e)}")
+        else:
+            print_status("ERROR", "Операционная ошибка при обновлении согласия на рассылку", str(e))
+            db_connection.rollback()
+            raise
+
+    except pyodbc.Error as e:
+        print_status("ERROR", "Ошибка базы данных при обновлении согласия на рассылку", str(e))
+        db_connection.rollback()
+        raise
+
+    except Exception as e:
+        print_status("ERROR", f"Неожиданная ошибка при обновлении согласия на рассылку {user_id}", str(e))
+        try:
+            db_connection.rollback()
+        except Exception:
+            pass
+        raise
+
 async def db_useraccess(user_id: int, period_minutes: int) -> int:
     """
     Название: db_useraccess
