@@ -3973,70 +3973,100 @@ async def get_useremailing(request: web.Request) -> web.Response:
         Принимает user_id и consent_to_mailing, проверяет блокировку пользователя
         и обновляет согласие на рассылку через БД.
     """
-    endpoint = '/user/emailing'
+    endpoint = '/user/mailing'
+    token = getattr(request, 'authenticated_token', None)
 
     try:
         data = await request.json()
     except Exception as e:
         if verbose_mode:
             print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return web.json_response(
+        response = web.json_response(
             {"status": "error", "code": 400, "message": "Некорректный JSON"},
             status=200
         )
-
-    user_id = data.get('user_id') or data.get('id')
-    phone = data.get('phone')
-    consent_to_mailing = data.get('consent_to_mailing')
-
-    if user_id is None or (isinstance(user_id, str) and not user_id.strip()):
-        return web.json_response(
-            {"status": "error", "code": 400, "message": "Поле user_id обязательно"},
-            status=200
-        )
-
-    if not isinstance(consent_to_mailing, bool):
-        return web.json_response(
-            {"status": "error", "code": 400, "message": "Поле consent_to_mailing обязательно и должно быть boolean"},
-            status=200
-        )
-
-    normalized_phone = None
-    if isinstance(phone, str) and phone.strip():
-        try:
-            normalized_phone = normalize_phone(phone)
-        except Exception as e:
-            if verbose_mode:
-                print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return web.json_response(
-                {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                status=200
-            )
-
-    if config.is_endpoint_userblocked(endpoint):
-        blocked_response = await ensure_user_request_not_blocked(
-            user_id=user_id,
-            phone=normalized_phone,
-            endpoint=endpoint
-        )
-        if blocked_response is not None:
-            return blocked_response
+        await add_server_signature_to_response(response, token)
+        return response
 
     try:
-        user_id_int = int(user_id)
-    except (ValueError, TypeError):
-        return web.json_response(
-            {"status": "error", "code": 400, "message": "Некорректный формат user_id"},
+        user_id = data.get('user_id') or data.get('id')
+        phone = data.get('phone')
+        consent_to_mailing = data.get('consent_to_mailing')
+
+        if user_id is None or (isinstance(user_id, str) and not user_id.strip()):
+            response = web.json_response(
+                {"status": "error", "code": 400, "message": "Поле user_id обязательно"},
+                status=200
+            )
+            await add_server_signature_to_response(response, token)
+            return response
+
+        if not isinstance(consent_to_mailing, bool):
+            response = web.json_response(
+                {
+                    "status": "error",
+                    "code": 400,
+                    "message": "Поле consent_to_mailing обязательно и должно быть boolean"
+                },
+                status=200
+            )
+            await add_server_signature_to_response(response, token)
+            return response
+
+        normalized_phone = None
+        if isinstance(phone, str) and phone.strip():
+            try:
+                normalized_phone = normalize_phone(phone)
+            except Exception as e:
+                if verbose_mode:
+                    print_status("ERROR", "Ошибка нормализации телефона", str(e))
+                response = web.json_response(
+                    {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
+                    status=200
+                )
+                await add_server_signature_to_response(response, token)
+                return response
+
+        if config.is_endpoint_userblocked(endpoint):
+            blocked_response = await ensure_user_request_not_blocked(
+                user_id=user_id,
+                phone=normalized_phone,
+                endpoint=endpoint
+            )
+            if blocked_response is not None:
+                await add_server_signature_to_response(blocked_response, token)
+                return blocked_response
+
+        try:
+            user_id_int = int(user_id)
+        except (ValueError, TypeError):
+            response = web.json_response(
+                {"status": "error", "code": 400, "message": "Некорректный формат user_id"},
+                status=200
+            )
+            await add_server_signature_to_response(response, token)
+            return response
+
+        result = await db_useremailing(user_id_int, consent_to_mailing)
+
+        response = web.json_response(
+            {"status": "success", "code": 0, "data": result},
             status=200
         )
+        await add_server_signature_to_response(response, token)
+        return response
 
-    result = await db_useremailing(user_id_int, consent_to_mailing)
-
-    return web.json_response(
-        {"status": "success", "code": 0, "data": result},
-        status=200
-    )
-
+    except web.HTTPException:
+        raise
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", "Ошибка в get_useremailing", str(e))
+        response = web.json_response(
+            {"status": "error", "code": 500, "message": "Внутренняя ошибка сервера"},
+            status=200
+        )
+        await add_server_signature_to_response(response, token)
+        return response
 
 async def db_useremailing(user_id: int, consent_to_mailing: bool) -> bool:
     """
@@ -7956,53 +7986,6 @@ async def get_documentlist(request):
         status=200
     )
 
-async def get_useremailing(request: web.Request) -> web.Response:
-    """
-    Название: get_useremailing
-    Назначение: Получение данных для email-рассылки пользователя
-    """
-    endpoint = '/user/emailing'
-
-    try:
-        data = await request.json()
-    except Exception as e:
-        if verbose_mode:
-            print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return web.json_response(
-            {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            status=200
-        )
-
-    user_id = data.get('user_id') or data.get('id')
-    phone = data.get('phone')
-
-    normalized_phone = None
-    if isinstance(phone, str) and phone.strip():
-        try:
-            normalized_phone = normalize_phone(phone)
-        except Exception as e:
-            if verbose_mode:
-                print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return web.json_response(
-                {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                status=200
-            )
-
-    if config.is_endpoint_userblocked(endpoint):
-        blocked_response = await ensure_user_request_not_blocked(
-            user_id=user_id,
-            phone=normalized_phone,
-            endpoint=endpoint
-        )
-        if blocked_response is not None:
-            return blocked_response
-
-    result = await db_useremailing(data)
-
-    return web.json_response(
-        {"status": "success", "code": 0, "data": result},
-        status=200
-    )
 
 
 # --- ОБРАБОТЧИК ЭНДПОИНТА ДЛЯ РАСЧЕТА РАСПРЕДЕЛЕНИЯ ПЛАТЕЖА ---
