@@ -3763,7 +3763,7 @@ async def db_documentsigned(document_id: str, is_signed: bool) -> bool:
         except Exception:
             pass
         raise
-    
+
 async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
     """
     Название: db_documentlist
@@ -8186,11 +8186,10 @@ async def get_documentsigned(request: web.Request) -> web.Response:
                 status_text = "подписан" if is_signed else "отклонен"
                 print_status(
                     "INFO",
-                    f"Обновление статуса документа",
+                    "Обновление статуса документа",
                     f"document_id: {document_id}, статус: {status_text}"
                 )
 
-            # Проверяем тип is_signed
             if not isinstance(is_signed, bool):
                 response_data = {
                     "status": "error",
@@ -8200,7 +8199,6 @@ async def get_documentsigned(request: web.Request) -> web.Response:
                 if verbose_mode:
                     print_status("ERROR", f"Неверный тип is_signed", type(is_signed).__name__)
             else:
-                # Обновляем статус документа в базе данных
                 update_success = await db_documentsigned(document_id, is_signed)
 
                 if update_success:
@@ -8213,11 +8211,11 @@ async def get_documentsigned(request: web.Request) -> web.Response:
                 else:
                     response_data = {
                         "status": "error",
-                        "message": "Ошибка обновления статуса документа. Документ не найден или ошибка в БД."
+                        "message": "Документ не найден"
                     }
                     response = web.json_response(response_data, status=200)
                     if verbose_mode:
-                        print_status("ERROR", f"Ошибка обновления статуса документа {document_id}")
+                        print_status("ERROR", f"Документ {document_id} не найден или не обновлен")
 
         # ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
         await add_server_signature_to_response(response, token)
@@ -8279,7 +8277,7 @@ async def get_documentsigned(request: web.Request) -> web.Response:
         await add_server_signature_to_response(response, token_for_signature)
 
         return response
-    
+        
 async def get_documentlist(request):
     """
     Название: get_documentlist
