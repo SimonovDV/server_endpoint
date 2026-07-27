@@ -3664,49 +3664,61 @@ async def db_documentsigned(document_id: str, is_signed: bool) -> bool:
     """
     if not db_connection:
         raise Exception("База данных не доступна")
-    
+
     try:
         # Преобразуем document_id в число
         try:
             doc_id_int = int(document_id)
         except (ValueError, TypeError):
             raise Exception(f"Неверный формат document_id: '{document_id}'")
-        
+
         # Преобразуем boolean в int (1 - подписан, 0 - отклонен)
         doc_is_signed_int = 1 if is_signed else 0
-        
+
         if verbose_mode:
-            print_status("INFO", f"Вызов хранимой процедуры Doc_Update_signed", 
-                        f"document_id: {doc_id_int}, is_signed: {doc_is_signed_int} ({'подписан' if is_signed else 'отклонен'})")
-        
+            print_status(
+                "INFO",
+                f"Вызов хранимой процедуры Doc_Update_signed",
+                f"document_id: {doc_id_int}, is_signed: {doc_is_signed_int} ({'подписан' if is_signed else 'отклонен'})"
+            )
+
         query = "EXECUTE [dbo].[Doc_Update_signed] @DOC_Id = ?, @DOC_Is_signed = ?"
-        
+
         cursor = db_connection.cursor()
-        
+
         # Устанавливаем таймаут выполнения (30 секунд)
         cursor.execute("SET LOCK_TIMEOUT 30000")
-        
+
         # Выполняем хранимую процедуру с параметрами
         cursor.execute(query, (doc_id_int, doc_is_signed_int))
-        
-        # Получаем результат
-        result_id = cursor.fetchval()
-        
+
+        # Получаем результат из первого доступного набора данных
+        result_id = None
+        while True:
+            if cursor.description:
+                row = cursor.fetchone()
+                if row is not None:
+                    result_id = row[0]
+                    break
+
+            if not cursor.nextset():
+                break
+
         # Фиксируем изменения
         db_connection.commit()
-        
+
         # Закрываем курсор для освобождения ресурсов
         cursor.close()
-        
+
         if verbose_mode:
             print_status("OK", f"Хранимая процедура Doc_Update_signed выполнена успешно")
             print(f"  Получен ID: {result_id}")
-        
+
         # Обрабатываем результат процедуры
         if result_id is not None:
             try:
                 result_id_int = int(result_id)
-                
+
                 if result_id_int == -1:
                     if verbose_mode:
                         print_status("ERROR", f"Ошибка в хранимой процедуре (ID = -1)")
@@ -3715,7 +3727,7 @@ async def db_documentsigned(document_id: str, is_signed: bool) -> bool:
                     if verbose_mode:
                         print_status("OK", f"Статус документа успешно обновлен", f"ID: {result_id_int}")
                     return True
-                    
+
             except (ValueError, TypeError) as e:
                 if verbose_mode:
                     print_status("ERROR", f"Ошибка преобразования результата", str(e))
@@ -3724,34 +3736,34 @@ async def db_documentsigned(document_id: str, is_signed: bool) -> bool:
             if verbose_mode:
                 print_status("ERROR", f"Процедура не вернула результат")
             return False
-        
+
     except pyodbc.OperationalError as e:
         if "timeout" in str(e).lower():
-            print_status("ERROR", f"Таймаут выполнения хранимой процедуры Doc_Update_signed", 
+            print_status("ERROR", f"Таймаут выполнения хранимой процедуры Doc_Update_signed",
                         f"document_id: {document_id}")
             try:
                 db_connection.rollback()
-            except:
+            except Exception:
                 pass
             raise Exception(f"Таймаут выполнения операции обновления статуса документа: {str(e)}")
         else:
             print_status("ERROR", f"Операционная ошибка при обновлении статуса документа {document_id}", str(e))
             db_connection.rollback()
             raise
-            
+
     except pyodbc.Error as e:
         print_status("ERROR", f"Ошибка базы данных при обновлении статуса документа {document_id}", str(e))
         db_connection.rollback()
         raise
-        
+
     except Exception as e:
         print_status("ERROR", f"Неожиданная ошибка при обновлении статуса документа {document_id}", str(e))
         try:
             db_connection.rollback()
-        except:
+        except Exception:
             pass
         raise
-
+    
 async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
     """
     Название: db_documentlist
@@ -8139,54 +8151,135 @@ async def get_setdocument(request: web.Request) -> web.Response:
                     asyncio.create_task(log_to_file('ERROR', 
                         f"Ошибка удаления временного файла {temp_file_path}: {str(e)}"))
                                         
-async def get_documentsigned(request):
+async def get_documentsigned(request: web.Request) -> web.Response:
     """
     Название: get_documentsigned
-    Назначение: Подписание документа пользователя
+    Назначение: Эндпоинт для обновления статуса подписания документа
+    Описание: Принимает document_id и is_signed, обновляет статус в БД через хранимую процедуру
+    Принцип работы: Проверяет входные данные, вызывает хранимую процедуру, возвращает результат
+    Входящие параметры: request - HTTP запрос с JSON телом содержащим document_id и is_signed
+    Исходящие параметры: web.Response - JSON ответ с кодом статуса и результатом операции
     """
-    endpoint = '/document/signed'
-
     try:
+        # Аутентификация по токену (с проверкой подписи клиента)
+        token = await authenticate_request(request)
+        if verbose_mode:
+            print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
+
+        # Парсим JSON тело запроса
         data = await request.json()
+        if verbose_mode:
+            print_status("INFO", f"Получены данные для обновления статуса документа", str(data))
+
+        # УНИВЕРСАЛЬНАЯ ПРОВЕРКА ОБЯЗАТЕЛЬНЫХ ПАРАМЕТРОВ
+        validation_result = validate_required_params(data, ['document_id', 'is_signed'])
+
+        if validation_result['status'] == 'error':
+            response = web.json_response(validation_result, status=200)
+            if verbose_mode:
+                print_status("ERROR", f"Ошибка валидации параметров", validation_result['message'])
+        else:
+            document_id = data['document_id']
+            is_signed = data['is_signed']
+
+            if verbose_mode:
+                status_text = "подписан" if is_signed else "отклонен"
+                print_status(
+                    "INFO",
+                    f"Обновление статуса документа",
+                    f"document_id: {document_id}, статус: {status_text}"
+                )
+
+            # Проверяем тип is_signed
+            if not isinstance(is_signed, bool):
+                response_data = {
+                    "status": "error",
+                    "message": "Параметр is_signed должен быть boolean (true/false)"
+                }
+                response = web.json_response(response_data, status=200)
+                if verbose_mode:
+                    print_status("ERROR", f"Неверный тип is_signed", type(is_signed).__name__)
+            else:
+                # Обновляем статус документа в базе данных
+                update_success = await db_documentsigned(document_id, is_signed)
+
+                if update_success:
+                    response_data = {
+                        "status": "success"
+                    }
+                    response = web.json_response(response_data, status=200)
+                    if verbose_mode:
+                        print_status("OK", f"Статус документа {document_id} успешно обновлен")
+                else:
+                    response_data = {
+                        "status": "error",
+                        "message": "Ошибка обновления статуса документа. Документ не найден или ошибка в БД."
+                    }
+                    response = web.json_response(response_data, status=200)
+                    if verbose_mode:
+                        print_status("ERROR", f"Ошибка обновления статуса документа {document_id}")
+
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
+        await add_server_signature_to_response(response, token)
+        if verbose_mode:
+            print_status("OK", f"Добавлена серверная подпись к ответу")
+
+        return response
+
+    except web.HTTPException as he:
+        response_data = {
+            "status": "error",
+            "message": he.text
+        }
+        response = web.json_response(response_data, status=he.status)
+        if verbose_mode:
+            print_status(
+                "ERROR",
+                f"HTTP исключение в get_documentsigned",
+                data_lines=[
+                    f"Статус: {he.status}",
+                    f"Текст: {he.text}"
+                ]
+            )
+        await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
+        return response
+
+    except json.JSONDecodeError as e:
+        if verbose_mode:
+            print_status("ERROR", f"Ошибка декодирования JSON", str(e))
+        response_data = {
+            "status": "error",
+            "message": "Невалидный JSON в теле запроса"
+        }
+        response = web.json_response(response_data, status=200)
+
+        auth_header = request.headers.get("Token", "")
+        token_for_signature = "json_error"
+        if auth_header.startswith("Bearer "):
+            token_for_signature = auth_header[7:]
+        await add_server_signature_to_response(response, token_for_signature)
+
+        return response
+
     except Exception as e:
         if verbose_mode:
-            print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return web.json_response(
-            {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            status=200
-        )
+            print_status("ERROR", f"Неожиданная ошибка в get_documentsigned", str(e))
+            import traceback
+            traceback.print_exc()
+        response_data = {
+            "status": "error",
+            "message": f"Ошибка при обновлении статуса документа: {str(e)}"
+        }
+        response = web.json_response(response_data, status=200)
 
-    user_id = data.get('user_id') or data.get('id')
-    phone = data.get('phone')
+        auth_header = request.headers.get("Token", "")
+        token_for_signature = "unexpected_error"
+        if auth_header.startswith("Bearer "):
+            token_for_signature = auth_header[7:]
+        await add_server_signature_to_response(response, token_for_signature)
 
-    normalized_phone = None
-    if isinstance(phone, str) and phone.strip():
-        try:
-            normalized_phone = normalize_phone(phone)
-        except Exception as e:
-            if verbose_mode:
-                print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return web.json_response(
-                {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                status=200
-            )
-
-    if config.is_endpoint_userblocked(endpoint):
-        blocked_response = await ensure_user_request_not_blocked(
-            user_id=user_id,
-            phone=normalized_phone,
-            endpoint=endpoint
-        )
-        if blocked_response is not None:
-            return blocked_response
-
-    result = await db_documentsigned(data)
-
-    return web.json_response(
-        {"status": "success", "code": 0, "data": result},
-        status=200
-    )
-
+        return response
+    
 async def get_documentlist(request):
     """
     Название: get_documentlist
