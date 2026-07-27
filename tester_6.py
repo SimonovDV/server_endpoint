@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import atexit
 import argparse
+from pathlib import Path
 from datetime import datetime
 
 import requests
@@ -29,7 +30,9 @@ class SecureDataExchangeTester:
 
     Добавлено:
     - аргумент запуска --keys-dir для указания каталога с .pem ключами;
-    - по умолчанию каталог ключей: ./key относительно каталога запуска.
+    - по умолчанию каталог ключей: ./keys относительно каталога запуска;
+    - подробный вывод параметров текущего запуска понятным языком;
+    - более надежная работа с путями в Windows.
     """
 
     def __init__(self, config_path=None, keys_dir=None):
@@ -45,65 +48,97 @@ class SecureDataExchangeTester:
         self.TOKEN = self.default_token
         self.request_timeout = self.default_timeout
         self.output_mode = 0
-        self.config_path = config_path
+        self.config_path = self.normalize_optional_path(config_path)
+        self.keys_dir_argument = keys_dir
 
-        self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else self.script_dir
-        self.launch_dir = os.getcwd()
+        self.is_windows = (os.name == 'nt')
+        self.script_dir = self.get_script_dir()
+        self.base_dir = self.get_base_dir()
+        self.launch_dir = self.get_launch_dir()
 
-        self.source_keys_dir = os.path.abspath(keys_dir) if keys_dir else os.path.join(self.launch_dir, "key")
+        self.source_keys_dir = self.resolve_keys_dir(keys_dir)
         self.keys_dir = self.source_keys_dir
-        self.files_dir = os.path.join(self.base_dir, "files")
+        self.files_dir = self.normalize_path(Path(self.base_dir) / 'files')
         self.temp_keys_dir = None
 
-        os.makedirs(self.source_keys_dir, exist_ok=True)
-        os.makedirs(self.files_dir, exist_ok=True)
+        self.ensure_directory(self.source_keys_dir)
+        self.ensure_directory(self.files_dir)
 
-        self.load_settings_from_json(config_path)
+        self.load_settings_from_json(self.config_path)
         self.rebuild_server_url()
         self.setup_keys()
         atexit.register(self.cleanup_temp_keys)
 
+    def normalize_path(self, path_value):
+        return str(Path(path_value).expanduser().resolve(strict=False))
+
+    def normalize_optional_path(self, path_value):
+        if not path_value:
+            return None
+        return self.normalize_path(path_value)
+
+    def ensure_directory(self, path_value):
+        Path(path_value).mkdir(parents=True, exist_ok=True)
+
+    def get_script_dir(self):
+        if getattr(sys, 'frozen', False):
+            return self.normalize_path(Path(sys.executable).resolve().parent)
+        return self.normalize_path(Path(__file__).resolve().parent)
+
+    def get_base_dir(self):
+        if getattr(sys, 'frozen', False):
+            return self.normalize_path(Path(sys.executable).resolve().parent)
+        return self.script_dir
+
+    def get_launch_dir(self):
+        return self.normalize_path(Path.cwd())
+
+    def resolve_keys_dir(self, keys_dir):
+        if keys_dir:
+            candidate = Path(keys_dir).expanduser()
+            if not candidate.is_absolute():
+                candidate = Path(self.launch_dir) / candidate
+            return self.normalize_path(candidate)
+        return self.normalize_path(Path(self.launch_dir) / 'keys')
+
     def setup_keys(self):
         self.cleanup_old_temp_keys()
-        self.temp_keys_dir = tempfile.mkdtemp(prefix="api_tester_keys_")
+        self.temp_keys_dir = self.normalize_path(Path(tempfile.mkdtemp(prefix="api_tester_keys_")))
         self.ensure_public_key()
         self.copy_keys_to_temp()
         self.keys_dir = self.temp_keys_dir
 
     def cleanup_old_temp_keys(self):
-        temp_dir = tempfile.gettempdir()
-        for item in os.listdir(temp_dir):
-            item_path = os.path.join(temp_dir, item)
-            if os.path.isdir(item_path) and item.startswith("api_tester_keys_"):
+        temp_dir = Path(tempfile.gettempdir())
+        for item in temp_dir.iterdir():
+            if item.is_dir() and item.name.startswith("api_tester_keys_"):
                 try:
-                    shutil.rmtree(item_path)
+                    shutil.rmtree(str(item))
                 except Exception:
                     pass
 
     def copy_keys_to_temp(self):
-        if not os.path.exists(self.source_keys_dir):
+        source_dir = Path(self.source_keys_dir)
+        target_dir = Path(self.temp_keys_dir)
+
+        if not source_dir.exists():
             return False
 
         copied = 0
-        for file_name in os.listdir(self.source_keys_dir):
-            if file_name.endswith('.pem'):
-                try:
-                    shutil.copy2(
-                        os.path.join(self.source_keys_dir, file_name),
-                        os.path.join(self.temp_keys_dir, file_name)
-                    )
-                    copied += 1
-                except Exception:
-                    pass
+        for pem_file in source_dir.glob('*.pem'):
+            try:
+                shutil.copy2(str(pem_file), str(target_dir / pem_file.name))
+                copied += 1
+            except Exception:
+                pass
         return copied > 0
 
     def ensure_public_key(self):
-        public_key_path = os.path.join(self.source_keys_dir, "public_server.pem")
-        if os.path.exists(public_key_path):
+        public_key_path = Path(self.source_keys_dir) / 'public_server.pem'
+        if public_key_path.exists():
             return
 
-        os.makedirs(os.path.dirname(public_key_path), exist_ok=True)
+        public_key_path.parent.mkdir(parents=True, exist_ok=True)
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         public_key = private_key.public_key()
 
@@ -114,7 +149,7 @@ class SecureDataExchangeTester:
             ))
 
     def cleanup_temp_keys(self):
-        if self.temp_keys_dir and os.path.exists(self.temp_keys_dir):
+        if self.temp_keys_dir and Path(self.temp_keys_dir).exists():
             try:
                 shutil.rmtree(self.temp_keys_dir)
             except Exception:
@@ -127,11 +162,16 @@ class SecureDataExchangeTester:
         """
         Загрузка настроек из JSON-файла, переданного через аргумент командной строки.
         """
-        if not config_path or not os.path.exists(config_path):
+        if not config_path:
+            return
+
+        config_file = Path(config_path)
+        if not config_file.exists():
+            print(f"Предупреждение: файл конфигурации не найден: {config_path}")
             return
 
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
             self.server_ip = str(data.get('server_ip') or data.get('ip') or data.get('host') or self.server_ip)
@@ -140,12 +180,12 @@ class SecureDataExchangeTester:
             self.TOKEN = str(data.get('token') or self.TOKEN)
             self.request_timeout = int(data.get('request_timeout') or data.get('timeout') or self.request_timeout)
 
-            print(f"Загружена конфигурация из файла: {config_path}")
+            print(f"Загружена конфигурация из файла: {self.normalize_path(config_file)}")
         except Exception as e:
             print(f"Предупреждение: не удалось загрузить настройки из JSON: {e}")
 
     def clear_screen(self):
-        os.system('cls' if os.name == 'nt' else 'clear')
+        os.system('cls' if self.is_windows else 'clear')
 
     def wait_for_key(self, message="Нажмите Enter для продолжения..."):
         input(f"\n{message}")
@@ -175,6 +215,60 @@ class SecureDataExchangeTester:
     def get_script_name(self):
         return os.path.basename(sys.argv[0]) or os.path.basename(__file__)
 
+    def describe_launch_parameters(self):
+        script_name = self.get_script_name()
+        config_display = self.config_path if self.config_path else 'не задан, используются встроенные настройки по умолчанию'
+        keys_arg_display = self.keys_dir_argument if self.keys_dir_argument else 'не задан, поэтому используется ./keys относительно каталога запуска'
+        frozen_display = 'да' if getattr(sys, 'frozen', False) else 'нет'
+        os_display = 'Windows' if self.is_windows else 'Linux/macOS'
+
+        print("\n" + "=" * 80)
+        print("ПАРАМЕТРЫ ТЕКУЩЕГО ЗАПУСКА ТЕСТЕРА")
+        print("=" * 80)
+        print("1. Общая информация о запуске")
+        print(f"   - Имя файла запуска: {script_name}")
+        print(f"   - Полная командная строка: {' '.join(sys.argv)}")
+        print(f"   - Операционная система: {os_display}")
+        print(f"   - Запуск из собранного EXE: {frozen_display}")
+        print()
+        print("2. Файл конфигурации сервера")
+        print(f"   - Аргумент config: {config_display}")
+        print("   - Если файл конфигурации не задан, тестер использует встроенные значения")
+        print("     для IP, порта, схемы, токена и таймаута.")
+        print()
+        print("3. Откуда тестер считает текущий каталог запуска")
+        print(f"   - Текущий каталог запуска: {self.launch_dir}")
+        print("   - Если параметр --keys-dir не указан, то каталог ключей берется как ./keys")
+        print("     именно относительно этого каталога запуска.")
+        print()
+        print("4. Где находится сам тестер")
+        print(f"   - Каталог файла скрипта: {self.script_dir}")
+        print(f"   - Базовый каталог программы: {self.base_dir}")
+        print("   - Базовый каталог используется, например, для папки files.")
+        print()
+        print("5. Как определяется каталог ключей .pem")
+        print(f"   - Аргумент --keys-dir: {keys_arg_display}")
+        print(f"   - Исходный каталог ключей: {self.source_keys_dir}")
+        print("   - Это основной каталог, откуда тестер читает ваши .pem-файлы.")
+        print("   - Ожидаемый файл для подписи запросов: public_server.pem")
+        print()
+        print("6. Как тестер реально работает с ключами во время запуска")
+        print(f"   - Временный рабочий каталог ключей: {self.keys_dir}")
+        print("   - При старте тестер копирует .pem-файлы из исходного каталога во временный каталог,")
+        print("     и дальше работает уже с этой временной копией.")
+        print()
+        print("7. Где тестер ищет файлы для загрузки")
+        print(f"   - Каталог files: {self.files_dir}")
+        print()
+        print("8. Сетевые настройки, с которыми тестер запущен сейчас")
+        print(f"   - Схема: {self.server_scheme}")
+        print(f"   - IP адрес: {self.server_ip}")
+        print(f"   - Порт: {self.server_port}")
+        print(f"   - Базовый URL: {self.SERVER_URL}")
+        print(f"   - Токен: {self.TOKEN}")
+        print(f"   - Таймаут: {self.request_timeout} сек.")
+        print("=" * 80)
+
     def print_startup_help(self):
         script_name = self.get_script_name()
         print("=" * 80)
@@ -183,12 +277,13 @@ class SecureDataExchangeTester:
         print("Краткая инструкция запуска:")
         print(f"  python {script_name}")
         print(f"  python {script_name} config.json")
-        print(f"  python {script_name} --keys-dir ./key")
+        print(f"  python {script_name} --keys-dir ./keys")
         print(f"  python {script_name} config.json --keys-dir D:/pem")
         print("\nПараметры запуска:")
         print("  config.json         - необязательный путь к JSON-файлу конфигурации")
         print("  --keys-dir PATH     - необязательный путь к каталогу с .pem ключами")
         print("\nДополнительно:")
+        print(f"  - каталог ключей по умолчанию: {self.normalize_path(Path(self.launch_dir) / 'keys')}")
         print(f"  - исходный каталог ключей: {self.source_keys_dir}")
         print(f"  - рабочий каталог ключей: {self.keys_dir}")
         print(f"  - каталог файлов: {self.files_dir}")
@@ -231,9 +326,9 @@ class SecureDataExchangeTester:
 
     def generate_signature(self):
         try:
-            public_key_path = os.path.join(self.keys_dir, "public_server.pem")
-            if not os.path.exists(public_key_path):
-                print(f"Ошибка: файл публичного ключа не найден: {public_key_path}")
+            public_key_path = Path(self.keys_dir) / 'public_server.pem'
+            if not public_key_path.exists():
+                print(f"Ошибка: файл публичного ключа не найден: {self.normalize_path(public_key_path)}")
                 return None
 
             with open(public_key_path, 'rb') as f:
@@ -415,14 +510,14 @@ class SecureDataExchangeTester:
     def test_document_load(self):
         self.print_test_title("ТЕСТ ЗАГРУЗКИ ДОКУМЕНТА /document/load")
 
-        if not os.path.isdir(self.files_dir):
+        if not Path(self.files_dir).is_dir():
             print(f"Ошибка: каталог с файлами не найден: {self.files_dir}")
             self.wait_for_key()
             return
 
         available_files = sorted(
             [
-                os.path.join(root, file_name)
+                str(Path(root) / file_name)
                 for root, _, files in os.walk(self.files_dir)
                 for file_name in files
             ]
@@ -558,35 +653,16 @@ def parse_arguments():
         '--keys-dir',
         dest='keys_dir',
         default=None,
-        help='Необязательный путь к каталогу с .pem ключами; по умолчанию используется ./key'
+        help='Необязательный путь к каталогу с .pem ключами; по умолчанию используется ./keys'
     )
     return parser.parse_args()
 
-def print_launch_parameters(args, tester):
-    print("\n" + "=" * 80)
-    print("ПАРАМЕТРЫ ТЕКУЩЕГО ЗАПУСКА")
-    print("=" * 80)
-    print(f"config           : {args.config}")
-    print(f"keys_dir (arg)   : {args.keys_dir}")
-    print(f"script_dir       : {tester.script_dir}")
-    print(f"base_dir         : {tester.base_dir}")
-    print(f"launch_dir       : {tester.launch_dir}")
-    print(f"source_keys_dir  : {tester.source_keys_dir}")
-    print(f"work_keys_dir    : {tester.keys_dir}")
-    print(f"files_dir        : {tester.files_dir}")
-    print(f"server_scheme    : {tester.server_scheme}")
-    print(f"server_ip        : {tester.server_ip}")
-    print(f"server_port      : {tester.server_port}")
-    print(f"server_url       : {tester.SERVER_URL}")
-    print(f"token            : {tester.TOKEN}")
-    print(f"timeout          : {tester.request_timeout}")
-    print("=" * 80)
 
 def main():
     args = parse_arguments()
     tester = SecureDataExchangeTester(config_path=args.config, keys_dir=args.keys_dir)
     tester.print_startup_help()
-    print_launch_parameters(args, tester)
+    tester.describe_launch_parameters()
     tester.output_mode = tester.ask_output_mode()
     tester.show_menu()
 
