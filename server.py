@@ -3965,99 +3965,79 @@ async def db_userid(user_id: str) -> bool:
         print_status("ERROR", f"Неожиданная ошибка при проверке пользователя {user_id}", str(e))
         raise
 
-async def db_useremailing(user_id: int, consent_to_mailing: bool) -> bool:
+async def get_useremailing(request: web.Request) -> web.Response:
     """
-    Название: db_useremailing
-    Назначение: Обновление согласия на email рассылку пользователя через хранимую процедуру
-    Описание: Вызывает хранимую процедуру USR_Update_consent_to_mailing для обновления настроек рассылки
-    Принцип работы: Вызывает хранимую процедуру с параметрами user_id и consent_to_mailing, проверяет результат
-    Входящие параметры:
-        user_id - идентификатор пользователя
-        consent_to_mailing - согласие на рассылку (True - получено, False - отказано)
-    Исходящие параметры: bool - True если операция успешна, False если USR_ID = -1
+    Название: get_useremailing
+    Назначение: Обновление согласия пользователя на email-рассылку
+    Описание:
+        Принимает user_id и consent_to_mailing, проверяет блокировку пользователя
+        и обновляет согласие на рассылку через БД.
     """
-    if not db_connection:
-        raise Exception("База данных не доступна")
-    
-    try:
-        query = "EXECUTE [dbo].[USR_Update_consent_to_mailing] @USR_ID = ?, @USR_consent_to_mailing = ?"
-        
-        if verbose_mode:
-            consent_text = "согласие получено" if consent_to_mailing else "отказ от рассылки"
-            print_status("INFO", f"Вызов хранимой процедуры USR_Update_consent_to_mailing", 
-                        f"user_id: {user_id}, consent: {consent_text}")
-        
-        cursor = db_connection.cursor()
-        
-        # Устанавливаем таймаут выполнения (30 секунд)
-        cursor.execute("SET LOCK_TIMEOUT 30000")
-        
-        # Выполняем хранимую процедуру с параметрами
-        cursor.execute(query, (user_id, 1 if consent_to_mailing else 0))
-        
-        # Получаем результат
-        result_id = cursor.fetchval()
-        
-        # Фиксируем изменения
-        db_connection.commit()
-        
-        # Закрываем курсор для освобождения ресурсов
-        cursor.close()
-        
-        if verbose_mode:
-            print_status("OK", f"Хранимая процедура USR_Update_consent_to_mailing выполнена успешно")
-            print(f"  Получен ID: {result_id}")
-        
-        # Обрабатываем результат процедуры
-        if result_id is not None:
-            try:
-                result_id_int = int(result_id)
-                
-                if result_id_int == '-1':
-                    if verbose_mode:
-                        print_status("ERROR", f"Ошибка в хранимой процедуре (ID = -1)")
-                    return False
-                else:
-                    if verbose_mode:
-                        print_status("OK", f"Согласие на рассылку успешно обновлено", f"ID: {result_id_int}")
-                    return True
-                    
-            except (ValueError, TypeError) as e:
-                if verbose_mode:
-                    print_status("ERROR", f"Ошибка преобразования результата", str(e))
-                return False
-        else:
-            if verbose_mode:
-                print_status("ERROR", f"Процедура не вернула результат")
-            return False
-        
-    except pyodbc.OperationalError as e:
-        if "timeout" in str(e).lower():
-            print_status("ERROR", f"Таймаут выполнения хранимой процедуры USR_Update_consent_to_mailing", 
-                        f"user_id: {user_id}")
-            try:
-                db_connection.rollback()
-            except:
-                pass
-            raise Exception(f"Таймаут выполнения операции обновления согласия на рассылку: {str(e)}")
-        else:
-            print_status("ERROR", f"Операционная ошибка при обновлении согласия на рассылку", str(e))
-            db_connection.rollback()
-            raise
-            
-    except pyodbc.Error as e:
-        print_status("ERROR", f"Ошибка базы данных при обновлении согласия на рассылку", str(e))
-        db_connection.rollback()
-        raise
-        
-    except Exception as e:
-        print_status("ERROR", f"Неожиданная ошибка при обновлении согласия на рассылку", str(e))
-        try:
-            db_connection.rollback()
-        except:
-            pass
-        raise
+    endpoint = '/user/emailing'
 
+    try:
+        data = await request.json()
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", "Ошибка парсинга JSON", str(e))
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Некорректный JSON"},
+            status=200
+        )
+
+    user_id = data.get('user_id') or data.get('id')
+    phone = data.get('phone')
+    consent_to_mailing = data.get('consent_to_mailing')
+
+    if user_id is None or (isinstance(user_id, str) and not user_id.strip()):
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Поле user_id обязательно"},
+            status=200
+        )
+
+    if not isinstance(consent_to_mailing, bool):
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Поле consent_to_mailing обязательно и должно быть boolean"},
+            status=200
+        )
+
+    normalized_phone = None
+    if isinstance(phone, str) and phone.strip():
+        try:
+            normalized_phone = normalize_phone(phone)
+        except Exception as e:
+            if verbose_mode:
+                print_status("ERROR", "Ошибка нормализации телефона", str(e))
+            return web.json_response(
+                {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
+                status=200
+            )
+
+    if config.is_endpoint_userblocked(endpoint):
+        blocked_response = await ensure_user_request_not_blocked(
+            user_id=user_id,
+            phone=normalized_phone,
+            endpoint=endpoint
+        )
+        if blocked_response is not None:
+            return blocked_response
+
+    try:
+        user_id_int = int(user_id)
+    except (ValueError, TypeError):
+        return web.json_response(
+            {"status": "error", "code": 400, "message": "Некорректный формат user_id"},
+            status=200
+        )
+
+    result = await db_useremailing(user_id_int, consent_to_mailing)
+
+    return web.json_response(
+        {"status": "success", "code": 0, "data": result},
+        status=200
+    )
+
+    
 async def db_useraccess(user_id: int, period_minutes: int) -> int:
     """
     Название: db_useraccess
