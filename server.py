@@ -3245,11 +3245,17 @@ async def db_login(phone: str, hashed_password: str):
         - индикатор блокировки через -2 больше не поддерживается;
         - legacy-состояния blocked/locked вне нового JSON-формата не поддерживаются;
         - источник истины по блокировке — только новый JSON-ответ БД.
+
     Исходящие значения:
-      - {'status': 'blocked', ...}                 -> блокировка от БД в новом формате
-      - 'invalid_credentials'                      -> неверные учетные данные
-      - {'status': 'success', 'data': {...}}       -> успешная авторизация
-      - {'status': 'error', 'message': '...'}      -> ошибка
+      - 'invalid_credentials'                  -> неверные учетные данные
+      - {'status': 'blocked', ...}            -> блокировка от БД в новом формате
+      - {'status': 'error', 'message': '...'} -> ошибка
+      - {...данные пользователя...}           -> успешная авторизация
+
+    Примечание:
+      Для совместимости с текущим get_login() при успешной авторизации
+      функция возвращает ПЛОСКИЙ словарь пользователя, а не обертку
+      {'status': 'success', 'data': ...}.
     """
     if not db_connection:
         raise Exception("Подключение к базе данных отсутствует")
@@ -3419,28 +3425,30 @@ async def db_login(phone: str, hashed_password: str):
                 if status == 'invalid_credentials':
                     return 'invalid_credentials'
 
-        return {
-            'status': 'success',
-            'data': mapped_rows[0] if len(mapped_rows) == 1 else mapped_rows
-        }
+                if status == 'error':
+                    return {
+                        'status': 'error',
+                        'message': item.get('message') or lowered.get('message') or 'БД вернула ошибку авторизации'
+                    }
+
+        return mapped_rows[0] if len(mapped_rows) == 1 else mapped_rows
 
     def _execute_login():
         cursor = db_connection.cursor()
         try:
-            
             # не удалять ! временная заглушка
             # cursor.execute(
-            #    "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?",
-            #    phone,
-            #    hashed_password
-            #)
+            #     "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?",
+            #     phone,
+            #     hashed_password
+            # )
 
             cursor.execute(
                 "EXECUTE [dbo].[USR_Select_ID_V2] @USR_Phone = ?, @USR_Password = ?",
                 phone,
                 hashed_password
             )
-            
+
             while True:
                 rows = cursor.fetchall() if cursor.description else []
 
@@ -3482,15 +3490,23 @@ async def db_login(phone: str, hashed_password: str):
                 print_status("WARNING", "БД вернула активную блокировку пользователя в новом JSON-формате", phone)
             return result
 
-        if isinstance(result, dict) and result.get('status') == 'success':
-            if verbose_mode:
-                print_status("OK", "Авторизация через БД успешна", phone)
-            return result
-
         if isinstance(result, dict) and result.get('status') == 'error':
             if verbose_mode:
                 print_status("ERROR", "Ошибка результата авторизации БД", result.get('message', 'unknown'))
             return result
+
+        if isinstance(result, dict):
+            if verbose_mode:
+                print_status("OK", "Авторизация через БД успешна", phone)
+            return result
+
+        if isinstance(result, list) and result:
+            first_item = result[0]
+            if isinstance(first_item, dict):
+                if verbose_mode:
+                    print_status("OK", "Авторизация через БД успешна (multi-row result, first row selected)", phone)
+                return first_item
+            return {'status': 'error', 'message': 'БД вернула список в неподдерживаемом формате'}
 
         return {'status': 'error', 'message': 'Неизвестный формат ответа БД'}
 
@@ -3498,7 +3514,7 @@ async def db_login(phone: str, hashed_password: str):
         if verbose_mode:
             print_status("ERROR", "Ошибка выполнения dbo.USR_Select_ID", str(e))
         return {'status': 'error', 'message': str(e)}
-            
+                
 async def db_setdocument(user_id: int, name: str, extension: str, cloud_link: str, description: str = None) -> Dict[str, Any]:
     """
     Название: db_setdocument
@@ -7651,7 +7667,39 @@ async def get_login(request):
     hashed_password = hash_password(password.strip())
     result = await db_login(normalized_phone, hashed_password)
 
-    if result:
+    if result == 'invalid_credentials':
+        lock_result = await register_failed_login_attempt(phone=normalized_phone)
+
+        if lock_result and lock_result.get("blocked"):
+            return await build_blocked_user_response(
+                lock_result,
+                endpoint=endpoint,
+                reason="too_many_failed_login_attempts"
+            )
+
+        return web.json_response(
+            {
+                "status": "error",
+                "code": 1,
+                "message": "Неверный логин или пароль"
+            },
+            status=200
+        )
+
+    if isinstance(result, dict) and result.get('status') == 'blocked':
+        return web.json_response(result, status=200)
+
+    if isinstance(result, dict) and result.get('status') == 'error':
+        return web.json_response(
+            {
+                "status": "error",
+                "code": 500,
+                "message": result.get('message', 'Ошибка авторизации')
+            },
+            status=200
+        )
+
+    if isinstance(result, dict):
         user_id = result.get('user_id') or result.get('id')
         await clear_failed_login_attempts(phone=normalized_phone, user_id=user_id)
 
@@ -7664,23 +7712,15 @@ async def get_login(request):
             status=200
         )
 
-    lock_result = await register_failed_login_attempt(phone=normalized_phone)
-
-    if lock_result and lock_result.get("blocked"):
-        return await build_blocked_user_response(
-            lock_result,
-            endpoint=endpoint,
-            reason="too_many_failed_login_attempts"
-        )
-
     return web.json_response(
         {
             "status": "error",
-            "code": 1,
-            "message": "Неверный логин или пароль"
+            "code": 500,
+            "message": "Неизвестный формат ответа авторизации"
         },
         status=200
     )
+
 
 async def get_setdocument(request):
     """
