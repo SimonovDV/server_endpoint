@@ -3764,28 +3764,27 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
     """
     if not db_connection:
         raise Exception("База данных не доступна")
-    
+
     try:
         # Преобразуем user_id в число
         try:
             user_id_int = int(user_id)
         except (ValueError, TypeError):
             raise Exception(f"Неверный формат user_id: '{user_id}'")
-        
+
         if verbose_mode:
-            print_status("INFO", f"Вызов хранимой процедуры DOC_Select_ID", 
+            print_status("INFO", f"Вызов хранимой процедуры DOC_Select_ID",
                         f"user_id: {user_id_int}")
-        
-        
-        # НЕ УЛАЛЯТЬ ! это заглушка
+
+        # НЕ УДАЛЯТЬ ! это заглушка
         # query = "EXECUTE [dbo].[DOC_Select_ID] @USR_ID = ?"
-        
+
         query = "EXECUTE [dbo].[DOC_Select_ID_V2] @USR_ID = ?"
         cursor = db_connection.cursor()
-        
+
         # Устанавливаем таймаут выполнения (30 секунд)
         cursor.execute("SET LOCK_TIMEOUT 30000")
-        
+
         # Выполняем хранимую процедуру с параметром
         cursor.execute(query, (user_id_int,))
 
@@ -3800,121 +3799,133 @@ async def db_documentlist(user_id: str) -> List[Dict[str, Any]]:
             if verbose_mode:
                 print_status("INFO", f"Процедура не возвращает данные для чтения")
             pass
-        
+
         # Фиксируем изменения
         db_connection.commit()
-        
+
         # Закрываем курсор для освобождения ресурсов
         cursor.close()
-        
+
         if verbose_mode:
             print_status("OK", f"Хранимая процедура DOC_Select_ID выполнена успешно")
             print(f"  Получено результатов: {len(results)}")
-        
+
         # Обрабатываем результат процедуры
         documents_list = []
-        
+
         if results and len(results) > 0:
             result_row = results[0]
-            
+
             # Получаем данные из поля ID (которое содержит JSON)
             json_data = result_row.get('ID')
-            
+
             if verbose_mode:
                 print_status("INFO", f"Получены JSON данные длиной {len(str(json_data))} символов")
-            
-            # Проверяем, не вернула ли процедура ошибку (-1)
-            if json_data == '-1':
+
+            if json_data is None:
                 if verbose_mode:
-                    print_status("ERROR", f"Процедура вернула ошибку (ID = -1)")
+                    print_status("INFO", "Процедура вернула пустое значение JSON")
                 return documents_list
-            
-            if json_data and isinstance(json_data, str) and json_data != '-1':
+
+            if isinstance(json_data, bytes):
                 try:
-                    # Парсим JSON строку
-                    parsed_data = json.loads(json_data)
-                    
-                    if isinstance(parsed_data, list):
-                        documents_list = parsed_data
-                        if verbose_mode:
-                            print_status("OK", f"Успешно распарсено документов", str(len(documents_list)))
-                            
-                            if documents_list and len(documents_list) > 0:
-                                first_doc = documents_list[0]
-                                print(f"  Первый документ: {first_doc.get('ID', 'N/A')} - {first_doc.get('Name', 'N/A')}")
-                    
-                    elif isinstance(parsed_data, dict):
-                        if 'items' in parsed_data and isinstance(parsed_data['items'], list):
-                            documents_list = parsed_data['items']
-                            if verbose_mode:
-                                print_status("OK", f"Успешно распарсено документов из поля 'items'", str(len(documents_list)))
-                        elif 'documents' in parsed_data and isinstance(parsed_data['documents'], list):
-                            documents_list = parsed_data['documents']
-                            if verbose_mode:
-                                print_status("OK", f"Успешно распарсено документов из поля 'documents'", str(len(documents_list)))
-                        else:
-                            documents_list = [parsed_data]
-                            if verbose_mode:
-                                print_status("OK", f"Получен одиночный документ")
-                    else:
-                        if verbose_mode:
-                            print_status("ERROR", f"Неверный формат данных от процедуры", type(parsed_data).__name__)
-                        
-                except json.JSONDecodeError as e:
-                    if verbose_mode:
-                        print_status("ERROR", f"Ошибка парсинга JSON из процедуры", str(e))
-                        print(f"  JSON данные (первые 500 символов): {str(json_data)[:500]}...")
-                except Exception as e:
-                    if verbose_mode:
-                        print_status("ERROR", f"Ошибка при обработке JSON данных", str(e))
-            else:
+                    json_data = json_data.decode('utf-8')
+                except Exception:
+                    json_data = json_data.decode('utf-8', errors='ignore')
+
+            if isinstance(json_data, str):
+                json_data = json_data.strip()
+
+            if json_data == '':
                 if verbose_mode:
-                    print_status("INFO", f"Процедура не вернула JSON данные или вернула ошибку")
+                    print_status("INFO", "Процедура вернула пустую JSON-строку")
+                return documents_list
+
+            try:
+                # Парсим JSON строку
+                parsed_data = json.loads(json_data)
+
+                if isinstance(parsed_data, list):
+                    documents_list = parsed_data
+                    if verbose_mode:
+                        print_status("OK", f"Успешно распарсено документов", str(len(documents_list)))
+
+                        if documents_list and len(documents_list) > 0 and isinstance(documents_list[0], dict):
+                            first_doc = documents_list[0]
+                            print(f"  Первый документ: {first_doc.get('ID', 'N/A')} - {first_doc.get('Name', 'N/A')}")
+
+                elif isinstance(parsed_data, dict):
+                    if 'items' in parsed_data and isinstance(parsed_data['items'], list):
+                        documents_list = parsed_data['items']
+                        if verbose_mode:
+                            print_status("OK", f"Успешно распарсено документов из поля 'items'", str(len(documents_list)))
+                    elif 'documents' in parsed_data and isinstance(parsed_data['documents'], list):
+                        documents_list = parsed_data['documents']
+                        if verbose_mode:
+                            print_status("OK", f"Успешно распарсено документов из поля 'documents'", str(len(documents_list)))
+                    else:
+                        documents_list = [parsed_data]
+                        if verbose_mode:
+                            print_status("OK", f"Получен одиночный документ")
+                else:
+                    if verbose_mode:
+                        print_status("ERROR", f"Неверный формат данных от процедуры", type(parsed_data).__name__)
+
+            except json.JSONDecodeError as e:
+                if verbose_mode:
+                    print_status("ERROR", f"Ошибка парсинга JSON из процедуры", str(e))
+                    print(f"  JSON данные (первые 500 символов): {str(json_data)[:500]}...")
+            except Exception as e:
+                if verbose_mode:
+                    print_status("ERROR", f"Ошибка при обработке JSON данных", str(e))
         else:
             if verbose_mode:
                 print_status("INFO", f"Процедура не вернула результаты")
-        
+
         # Преобразуем структуру данных в требуемый формат
         formatted_documents = []
         for doc in documents_list:
-            formatted_doc = doc.copy()
+            if isinstance(doc, dict):
+                formatted_doc = doc.copy()
+            else:
+                formatted_doc = doc
             formatted_documents.append(formatted_doc)
-        
+
         if verbose_mode:
             if not formatted_documents:
                 print_status("INFO", f"Процедура не вернула данные документов или список пуст")
             else:
                 print_status("OK", f"Успешно получено документов", str(len(formatted_documents)))
-        
+
         return formatted_documents
-        
+
     except pyodbc.OperationalError as e:
         if "timeout" in str(e).lower():
-            print_status("ERROR", f"Таймаут выполнения хранимой процедуры DOC_Select_ID", 
+            print_status("ERROR", f"Таймаут выполнения хранимой процедуры DOC_Select_ID",
                         f"user_id: {user_id}")
             try:
                 db_connection.rollback()
-            except:
+            except Exception:
                 pass
             raise Exception(f"Таймаут выполнения операции получения списка документов: {str(e)}")
         else:
             print_status("ERROR", f"Операционная ошибка при получении списка документов {user_id}", str(e))
             db_connection.rollback()
             raise
-            
+
     except pyodbc.Error as e:
         print_status("ERROR", f"Ошибка базы данных при получении списка документов {user_id}", str(e))
         db_connection.rollback()
         raise
-        
+
     except Exception as e:
         print_status("ERROR", f"Неожиданная ошибка при получении списка документов {user_id}", str(e))
         try:
             db_connection.rollback()
-        except:
+        except Exception:
             pass
         raise
-
+    
 async def db_userid(user_id: str) -> bool:
     """
     Название: db_userid
