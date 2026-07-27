@@ -2425,17 +2425,17 @@ async def reconnect_database():
         raise
 
 
-async def db_usr_insert(normalized_phone: str) -> Optional[int]:
+async def db_usr_insert(normalized_phone: str) -> Optional[Dict[str, Any]]:
     """
     Название: db_usr_insert
     Назначение: Единая функция вызова хранимой процедуры USR_Insert
     Описание:
-        Выполняет вызов EXECUTE [dbo].[USR_Insert_deb_new] @USR_Phone = ?,
-        поддерживает как старый скалярный ответ, так и JSON-ответ вида [{"ID": 83}].
+        Выполняет вызов EXECUTE [dbo].[USR_Insert_V2] @USR_Phone = ?,
+        возвращает JSON-ответ хранимой процедуры в виде Python-словаря.
     Входящие параметры:
         normalized_phone - нормализованный 10-значный номер телефона
     Исходящие параметры:
-        Optional[int] - идентификатор пользователя или None при ошибке/отсутствии пользователя
+        Optional[Dict[str, Any]] - JSON-ответ хранимой процедуры или None при ошибке/пустом результате
     """
     if not db_connection:
         raise Exception("База данных не доступна")
@@ -2443,8 +2443,6 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
     if not normalized_phone:
         return None
 
-    # НЕ УДАЛЯТЬ! ЭТО ЗАГЛУШКА
-    # query = "EXECUTE [dbo].[USR_Insert] @USR_Phone = ?"
     query = "EXECUTE [dbo].[USR_Insert_V2] @USR_Phone = ?"
     cursor = None
 
@@ -2469,10 +2467,7 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
 
                 if rows:
                     first_row = rows[0]
-
                     if first_row:
-                        # Берем первое значение независимо от имени колонки:
-                        # для FOR JSON PATH это будет JSON_F52E2B61-18A1-11d1-B105-00805F49916B
                         raw_result = list(first_row.values())[0]
 
         except pyodbc.ProgrammingError:
@@ -2500,28 +2495,32 @@ async def db_usr_insert(normalized_phone: str) -> Optional[int]:
             if raw_result_str.startswith('[') or raw_result_str.startswith('{'):
                 parsed = json.loads(raw_result_str)
 
-                if isinstance(parsed, list) and parsed:
-                    first_item = parsed[0]
-                    if isinstance(first_item, dict):
-                        raw_result = first_item.get('ID') or first_item.get('USR_ID')
+                if isinstance(parsed, list):
+                    if parsed and isinstance(parsed[0], dict):
+                        result = parsed[0]
                     else:
-                        raw_result = None
+                        result = None
                 elif isinstance(parsed, dict):
-                    raw_result = parsed.get('ID') or parsed.get('USR_ID')
+                    result = parsed
                 else:
-                    raw_result = None
+                    result = None
             else:
-                raw_result = int(raw_result_str)
-
-        user_id = int(raw_result)
+                try:
+                    result = {"ID": int(raw_result_str)}
+                except ValueError:
+                    result = None
+        elif isinstance(raw_result, dict):
+            result = raw_result
+        else:
+            try:
+                result = {"ID": int(raw_result)}
+            except (ValueError, TypeError):
+                result = None
 
         if verbose_mode:
-            print_status("OK", "USR_Insert выполнена успешно", f"user_id: {user_id}")
+            print_status("OK", "USR_Insert выполнена успешно", f"result: {result}")
 
-        if user_id <= 0:
-            return None
-
-        return user_id
+        return result
 
     except pyodbc.OperationalError as e:
         if "timeout" in str(e).lower():
@@ -2564,7 +2563,7 @@ async def db_get_user_id_by_phone(phone: str) -> Optional[int]:
     Назначение: Получение только идентификатора пользователя по номеру телефона
     Описание:
         Нормализует телефон и вызывает db_usr_insert(...), которая выполняет
-        хранимую процедуру USR_Insert_V2 и возвращает user_id.
+        хранимую процедуру USR_Insert_V2 и возвращает JSON-ответ.
         Используется в служебных местах, где нужен только user_id,
         например при построении ключа блокировки, без вызова USR_Select
         и без получения полной карточки пользователя.
@@ -2595,14 +2594,34 @@ async def db_get_user_id_by_phone(phone: str) -> Optional[int]:
                 data_lines=[f"phone={phone!r}", f"normalized_phone={normalized_phone!r}"]
             )
 
-        user_id = await db_usr_insert(normalized_phone)
+        result = await db_usr_insert(normalized_phone)
+
+        if result is None:
+            if verbose_mode:
+                print_status(
+                    "INFO",
+                    "db_get_user_id_by_phone: результат USR_Insert пустой",
+                    data_lines=[f"normalized_phone={normalized_phone!r}"]
+                )
+            return None
+
+        if not isinstance(result, dict):
+            if verbose_mode:
+                print_status(
+                    "ERROR",
+                    "db_get_user_id_by_phone: USR_Insert вернула не dict",
+                    data_lines=[f"result={result!r}", f"type={type(result).__name__}", f"normalized_phone={normalized_phone!r}"]
+                )
+            return None
+
+        user_id = result.get("ID") or result.get("USR_ID")
 
         if user_id is None:
             if verbose_mode:
                 print_status(
                     "INFO",
-                    "db_get_user_id_by_phone: user_id не найден",
-                    data_lines=[f"normalized_phone={normalized_phone!r}"]
+                    "db_get_user_id_by_phone: ID отсутствует в результате USR_Insert",
+                    data_lines=[f"result={result!r}", f"normalized_phone={normalized_phone!r}"]
                 )
             return None
 
@@ -2612,8 +2631,8 @@ async def db_get_user_id_by_phone(phone: str) -> Optional[int]:
             if verbose_mode:
                 print_status(
                     "ERROR",
-                    "db_get_user_id_by_phone: не удалось преобразовать user_id к int",
-                    data_lines=[f"user_id={user_id!r}", f"normalized_phone={normalized_phone!r}"]
+                    "db_get_user_id_by_phone: не удалось преобразовать ID к int",
+                    data_lines=[f"user_id={user_id!r}", f"result={result!r}", f"normalized_phone={normalized_phone!r}"]
                 )
             return None
 
@@ -2622,7 +2641,7 @@ async def db_get_user_id_by_phone(phone: str) -> Optional[int]:
                 print_status(
                     "INFO",
                     "db_get_user_id_by_phone: получен неположительный user_id",
-                    data_lines=[f"user_id={user_id!r}", f"normalized_phone={normalized_phone!r}"]
+                    data_lines=[f"user_id={user_id!r}", f"result={result!r}", f"normalized_phone={normalized_phone!r}"]
                 )
             return None
 
@@ -2630,7 +2649,7 @@ async def db_get_user_id_by_phone(phone: str) -> Optional[int]:
             print_status(
                 "OK",
                 "db_get_user_id_by_phone: user_id успешно определен",
-                data_lines=[f"user_id={user_id!r}", f"normalized_phone={normalized_phone!r}"]
+                data_lines=[f"user_id={user_id!r}", f"result={result!r}", f"normalized_phone={normalized_phone!r}"]
             )
 
         return user_id
@@ -2668,15 +2687,30 @@ async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
     cursor = None
 
     try:
-        user_id = await db_usr_insert(normalized_phone)
+        insert_result = await db_usr_insert(normalized_phone)
+        if insert_result is None or not isinstance(insert_result, dict):
+            return None
+
+        user_id = insert_result.get("ID") or insert_result.get("USR_ID")
+        code = insert_result.get("code")
+
         if user_id is None:
             return None
-        
+
+        try:
+            user_id = int(user_id)
+        except Exception:
+            if verbose_mode:
+                print_status("ERROR", "Некорректный user_id из USR_Insert", f"user_id: {user_id}")
+            return None
+
+        if user_id <= 0:
+            return None
 
         query = "EXECUTE [dbo].[USR_Select] @USR_Id = ?"
 
         if verbose_mode:
-            print_status("INFO", "Вызов хранимой процедуры USR_Select", f"user_id: {user_id}")
+            print_status("INFO", "Вызов хранимой процедуры USR_Select", f"user_id: {user_id}, code: {code}")
 
         cursor = db_connection.cursor()
         cursor.execute("SET LOCK_TIMEOUT 30000")
@@ -2748,16 +2782,17 @@ async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
                     user_data["surname"] = user_data.get("surname") or user_data.get("USR_Surname")
                     user_data["name"] = user_data.get("name") or user_data.get("USR_Name")
                     user_data["patronymic"] = user_data.get("patronymic") or user_data.get("USR_Patronymic")
-                    # работаем со сторкой ниже
+
                     raw_password = user_data.get("password")
                     if raw_password is None:
                         raw_password = user_data.get("USR_Password")
 
                     user_data["is_password_set"] = bool(str(raw_password).strip()) if raw_password is not None else False
+                    user_data["code"] = code
 
                     if verbose_mode:
                         print_status("OK", "Найден пользователь",
-                                     f"ID: {user_data.get('id')}, Телефон: {normalized_phone}")
+                                     f"ID: {user_data.get('id')}, code: {code}, Телефон: {normalized_phone}")
 
                     return user_data
                 else:
@@ -2788,16 +2823,17 @@ async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
         fallback_user["surname"] = fallback_user.get("surname") or fallback_user.get("USR_Surname")
         fallback_user["name"] = fallback_user.get("name") or fallback_user.get("USR_Name")
         fallback_user["patronymic"] = fallback_user.get("patronymic") or fallback_user.get("USR_Patronymic")
-        # работаем со сторкой ниже
+
         raw_password = fallback_user.get("password")
         if raw_password is None:
             raw_password = fallback_user.get("USR_Password")
 
         fallback_user["is_password_set"] = bool(str(raw_password).strip()) if raw_password is not None else False
+        fallback_user["code"] = code
 
         if verbose_mode:
             print_status("OK", "Найден пользователь через rowset",
-                         f"ID: {fallback_user.get('id')}, Телефон: {normalized_phone}")
+                         f"ID: {fallback_user.get('id')}, code: {code}, Телефон: {normalized_phone}")
 
         return fallback_user
 
@@ -2838,7 +2874,8 @@ async def db_user_by_phone(phone: str) -> Optional[Dict[str, Any]]:
             if cursor is not None:
                 cursor.close()
         except Exception:
-            pass        
+            pass
+
 
 async def db_user_update(user_id: int, email: str, password: str) -> bool:
     """
@@ -7327,10 +7364,17 @@ async def get_user_by_phone(request):
 
     if result:
         is_password_set = bool(result.get("is_password_set"))
+
+        sp_code = result.get("code")
+        try:
+            response_code = int(sp_code)
+        except (TypeError, ValueError):
+            response_code = 2 if is_password_set else 1
+
         return web.json_response(
             {
                 "status": "success",
-                "code": 2 if is_password_set else 1,
+                "code": response_code,
                 "data": {
                     "id": str(result.get("id") or result.get("user_id") or ""),
                     "email": result.get("email"),
