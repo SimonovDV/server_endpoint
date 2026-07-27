@@ -7842,54 +7842,303 @@ async def get_login(request):
     )
 
 
-async def get_setdocument(request):
+async def get_setdocument(request: web.Request) -> web.Response:
     """
     Название: get_setdocument
-    Назначение: Сохранение документа пользователя
+    Назначение: Эндпоинт для сохранения файлов любого типа с контролем размера
+    Описание: Принимает данные файла в формате base64, проверяет размер файла,
+            сохраняет временный файл, загружает в облачное хранилище и 
+            сохраняет метаданные в базу данных
+    Принцип работы:
+    1. Проверяет аутентификацию и авторизацию запроса
+    2. Валидирует размер запроса по заголовку Content-Length
+    3. Парсит JSON тело запроса и проверяет обязательные поля
+    4. Проверяет фактический размер файла из данных base64
+    5. Сохраняет файл из base64 во временную директорию
+    6. Загружает файл в облачное хранилище (если включено)
+    7. Сохраняет метаданные документа в базу данных
+    8. Возвращает результат с серверной подписью
+    Особенности:
+    - Принимает файлы любого типа
+    - Проверяет размер файла до и после декодирования base64
+    - Использует лимит из конфигурации (config.max_upload_size)
+    - Автоматически очищает временные файлы
+    - Поддерживает работу без облачного хранилища
+    Входящие параметры:
+    request - HTTP запрос с JSON телом содержащим:
+        data:      (обязательное) Данные файла в формате base64
+        extension: (обязательное) Расширение файла (например: pdf, jpg, doc, zip и т.д.)
+        name:      (опциональное) Имя файла, по умолчанию генерируется
+        description: (опциональное) Описание документа
+        user_id:   (опциональное) ID пользователя для привязки документа
+    Исходящие параметры:
+    web.Response - JSON ответ с кодом статуса 200 и структурой:
+        Успех: {"status": "success", "link": "URL_к_файлу"}
+        Ошибка: {"status": "error", "message": "Описание_ошибки"}
+    Ошибки:
+    413 - Размер запроса превышает лимит (Payload Too Large)
+    400 - Невалидный JSON или отсутствуют обязательные поля
+    403 - Ошибка аутентификации/авторизации
+    200 - Бизнес-логические ошибки (пользователь не найден, ошибка БД и т.д.)
     """
-    endpoint = '/document/set'
-
+    temp_file_path = None
+    
     try:
-        data = await request.json()
-    except Exception as e:
+        # Шаг 1: Аутентификация и авторизация запроса
+        token = await authenticate_request(request)
         if verbose_mode:
-            print_status("ERROR", "Ошибка парсинга JSON", str(e))
-        return web.json_response(
-            {"status": "error", "code": 400, "message": "Некорректный JSON"},
-            status=200
-        )
+            print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
 
-    user_id = data.get('user_id') or data.get('id')
-    phone = data.get('phone')
-
-    normalized_phone = None
-    if isinstance(phone, str) and phone.strip():
-        try:
-            normalized_phone = normalize_phone(phone)
-        except Exception as e:
+        # Шаг 2: Предварительная проверка размера запроса
+        content_length = request.content_length
+        if content_length:
+            max_size_bytes = config.max_upload_size * 1024 * 1024
+            
             if verbose_mode:
-                print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return web.json_response(
-                {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                status=200
-            )
+                content_mb = content_length / 1024 / 1024
+                max_mb = config.max_upload_size
+                print_status("INFO", f"Проверка размера запроса",
+                            f"{content_length:,} байт ({content_mb:.2f} МБ) из "
+                            f"{max_size_bytes:,} допустимых ({max_mb} МБ)")
+            
+            if content_length > max_size_bytes:
+                response_data = {
+                    "status": "error",
+                    "message": f"Размер запроса ({content_mb:.1f} МБ) "
+                            f"превышает максимально допустимый ({max_mb} МБ)"
+                }
+                response = web.json_response(response_data, status=413)
+                await add_server_signature_to_response(response, token)
+                return response
+        
+        # Шаг 3: Парсинг и валидация JSON тела запроса
+        data = await request.json()
+        
+        if verbose_mode:
+            received_fields = list(data.keys())
+            print_status("INFO", f"Получены данные для сохранения файла", 
+                        f"поля: {received_fields}")
+            if 'data' in data:
+                data_size = len(data['data'])
+                print(f"  Размер данных base64: {data_size:,} байт "
+                    f"({data_size / 1024 / 1024:.2f} МБ)")
+        
+        # Шаг 4: Проверка обязательных полей
+        validation_result = validate_required_params(data, ['data', 'extension','user_id'])
+        
+        if validation_result['status'] == 'error':
+            response = web.json_response(validation_result, status=200)
+            if verbose_mode:
+                print_status("ERROR", f"Ошибка валидации параметров", validation_result['message'])
+        else:
+            # Извлекаем параметры из запроса
+            file_data = data['data']           # Base64 данные файла
+            extension = data['extension']      # Расширение файла
+            name = data.get('name', f"file_{int(time.time())}")  # Имя или сгенерированное
+            description = data.get('description')  # Описание документа (опционально)
+            user_id = data.get('user_id')      # ID пользователя 
+            doc_type = data.get('type')  # Тип документа (опционально)
 
-    if config.is_endpoint_userblocked(endpoint):
-        blocked_response = await ensure_user_request_not_blocked(
-            user_id=user_id,
-            phone=normalized_phone,
-            endpoint=endpoint
-        )
-        if blocked_response is not None:
-            return blocked_response
 
-    result = await db_setdocument(data)
-
-    return web.json_response(
-        {"status": "success", "code": 0, "data": result},
-        status=200
-    )
+            # Шаг 5: Валидация расширения файла (принимаем любые расширения)
+            extension_lower = extension.lower().strip()
+            
+            if verbose_mode:
+                print_status("INFO", f"Получено расширение файла",
+                            f"'{extension}' -> нормализовано: '{extension_lower}'")
+            
+            # Проверяем существование пользователя (если user_id указан)
+            if user_id:
+                user_exists = await db_userid(user_id)
+                if not user_exists:
+                    raise Exception(f"Пользователь с ID {user_id} не найден")            
+            
+            if verbose_mode:
+                print_status("INFO", f"Обработка файла", 
+                            f"name: {name}, extension: {extension_lower}")
+                if description:
+                    print(f"  Описание: {description}")
+                if user_id:
+                    print(f"  User ID: {user_id}")
+            
+            # Шаг 6: Проверка фактического размера файла из base64
+            try:
+                import base64
+                file_size_bytes = len(base64.b64decode(file_data))
+                max_size_bytes = config.max_upload_size * 1024 * 1024
+                
+                if verbose_mode:
+                    size_mb = file_size_bytes / 1024 / 1024
+                    max_mb = config.max_upload_size
+                    print_status("INFO", f"Фактический размер файла", 
+                                f"{size_mb:.2f} МБ из {max_mb} допустимых")
+                
+                if file_size_bytes > max_size_bytes:
+                    response_data = {
+                        "status": "error",
+                        "message": f"Размер файла ({size_mb:.1f} МБ) "
+                                f"превышает максимально допустимый ({max_mb} МБ)"
+                    }
+                    response = web.json_response(response_data, status=200)
+                    await add_server_signature_to_response(response, token)
+                    return response
                     
+            except Exception as e:
+                if verbose_mode:
+                    print_status("WARNING", f"Не удалось проверить размер файла", str(e))
+                # Продолжаем обработку если не удалось проверить размер
+            
+            # Шаг 7: Преобразование user_id в число для базы данных
+            user_id_int = None
+            if user_id:
+                try:
+                    user_id_int = int(user_id)
+                    if verbose_mode:
+                        print_status("INFO", f"User ID преобразован в число", f"{user_id_int}")
+                except (ValueError, TypeError):
+                    if verbose_mode:
+                        print_status("ERROR", f"Неверный формат user_id", f"'{user_id}' не является числом")
+                    response_data = {
+                        "status": "error",
+                        "message": "Параметр user_id должен быть числом"
+                    }
+                    response = web.json_response(response_data, status=200)
+                    await add_server_signature_to_response(response, token)
+                    return response
+            else:
+                if verbose_mode:
+                    print_status("INFO", f"User ID не указан, будет использовано значение по умолчанию")
+            
+            # Шаг 8: Сохранение файла из base64 во временную директорию
+            try:
+                # Добавляем расширение к имени файла если его нет
+                if not name.lower().endswith(f'.{extension_lower}'):
+                    name = f"{name}.{extension_lower}"
+                    if verbose_mode:
+                        print_status("INFO", f"Нормализация имени файла", 
+                                    f"добавлено расширение .{extension_lower}: {name}")
+                
+                temp_file_path = save_base64_to_file(file_data, name, extension_lower)
+                file_name = os.path.basename(temp_file_path)
+                
+                if verbose_mode:
+                    file_size = os.path.getsize(temp_file_path)
+                    print_status("OK", f"Файл временно сохранен", 
+                                f"{file_name} ({file_size / 1024 / 1024:.2f} МБ)")
+            except Exception as e:
+                response_data = {
+                    "status": "error",
+                    "message": f"Ошибка сохранения файла: {str(e)}"
+                }
+                response = web.json_response(response_data, status=200)
+                await add_server_signature_to_response(response, token)
+                return response
+            
+            # Шаг 9: Загрузка файла в облачное хранилище
+            cloud_link = None
+            if config.cloud_enabled:
+                try:
+                    cloud_link = await upload_to_cloud(temp_file_path, file_name)
+                    
+                    if not cloud_link:
+                        response_data = {
+                            "status": "error",
+                            "message": "Ошибка загрузки файла в облачное хранилище"
+                        }
+                        response = web.json_response(response_data, status=200)
+                        await add_server_signature_to_response(response, token)
+                        return response
+                    
+                    if verbose_mode:
+                        print_status("OK", f"Файл загружен в облако", cloud_link)
+                except Exception as e:
+                    response_data = {
+                        "status": "error",
+                        "message": f"Ошибка загрузки файла в облако: {str(e)}"
+                    }
+                    response = web.json_response(response_data, status=200)
+                    await add_server_signature_to_response(response, token)
+                    return response
+            else:
+                if verbose_mode:
+                    print_status("INFO", f"Облачное хранилище отключено")
+            
+            # Шаг 10: Сохранение метаданных файла в базу данных
+            # Используем расширение файла в верхнем регистре для типа документа
+            # doc_type = extension_lower.upper() if extension_lower else 'UNKNOWN'
+            
+            save_result = await db_setdocument(user_id_int, name, doc_type, cloud_link, description)
+            
+            if save_result["success"]:
+                response_data = {
+                    "status": "success",
+                    "link": cloud_link or f"https://example.com/documents/{save_result['record_id']}"
+                }
+                response = web.json_response(response_data, status=200)
+                if verbose_mode:
+                    print_status("OK", f"Файл успешно сохранен", 
+                                f"ID: {save_result['record_id']}, тип: {doc_type}, ссылка: {response_data['link']}")
+            else:
+                response_data = {
+                    "status": "error", 
+                    "message": save_result["message"]
+                }
+                response = web.json_response(response_data, status=200)
+                if verbose_mode:
+                    print_status("ERROR", f"Ошибка сохранения файла", save_result["message"])
+        
+        # Шаг 11: Добавление серверной подписи к ответу
+        await add_server_signature_to_response(response, token)
+        if verbose_mode:
+            print_status("OK", f"Добавлена серверная подпись к ответу")
+        
+        return response
+        
+    except web.HTTPException as he:
+        response_data = {
+            "status": "error",
+            "message": he.text
+        }
+        response = web.json_response(response_data, status=he.status)
+        await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
+        return response
+        
+    except json.JSONDecodeError as e:
+        response_data = {
+            "status": "error",
+            "message": "Невалидный JSON в теле запроса"
+        }
+        response = web.json_response(response_data, status=200)
+        auth_header = request.headers.get("Token", "")
+        token_for_signature = auth_header[7:] if auth_header.startswith("Bearer ") else "json_error"
+        await add_server_signature_to_response(response, token_for_signature)
+        return response
+        
+    except Exception as e:
+        response_data = {
+            "status": "error",
+            "message": f"Ошибка при сохранении файла: {str(e)}"
+        }
+        response = web.json_response(response_data, status=200)
+        auth_header = request.headers.get("Token", "")
+        token_for_signature = auth_header[7:] if auth_header.startswith("Bearer ") else "unexpected_error"
+        await add_server_signature_to_response(response, token_for_signature)
+        return response
+        
+    finally:
+        # Шаг 12: Очистка временных файлов
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+                if verbose_mode:
+                    print_status("INFO", f"Временный файл удален", temp_file_path)
+            except Exception as e:
+                if verbose_mode:
+                    print_status("ERROR", f"Ошибка удаления временного файла", str(e))
+                if config.is_log_to_file_enabled():
+                    asyncio.create_task(log_to_file('ERROR', 
+                        f"Ошибка удаления временного файла {temp_file_path}: {str(e)}"))
+                                        
 async def get_documentsigned(request):
     """
     Название: get_documentsigned
