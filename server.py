@@ -4286,7 +4286,7 @@ async def db_calculate_payment_distribution(json_str: str) -> Optional[str]:
             print(f"  Данные: {json_str[:200]}..." if len(json_str) > 200 else f"  Данные: {json_str}")
         
         # Теперь процедура принимает только один параметр - JSON строку
-        query = "EXECUTE [dbo].[PYM_CalculateDistribution] @Json = ?"
+        query = "EXECUTE [dbo].[usp_CalculatePaymentDistribution] @Json = ?"
         
         cursor = db_connection.cursor()
         
