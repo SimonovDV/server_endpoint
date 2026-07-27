@@ -3558,7 +3558,7 @@ async def db_setdocument(user_id: int, name: str, extension: str, cloud_link: st
                 print(f"  Ссылка на облако: {cloud_link}")
         
         query = """
-        EXECUTE [dbo].[DCT_Insert] 
+        EXECUTE [dbo].[[Doc_created_at] 
             @USR_Id = ?, 
             @DOC_Type = ?, 
             @DOC_Name = ?, 
