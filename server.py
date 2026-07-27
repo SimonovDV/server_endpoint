@@ -7993,95 +7993,206 @@ async def get_documentlist(request):
 async def get_payment_calculate_distribution(request: web.Request) -> web.Response:
     """
     Название: get_payment_calculate_distribution
-    Назначение: Расчет распределения платежа по займам
-    Описание: Принимает JSON c user_id и amount, вызывает хранимую процедуру и возвращает результат.
-              Если endpoint включен в endpoint_userblocked, перед обращением к БД
-              выполняется проверка локальной блокировки пользователя.
-              Если endpoint не включен в endpoint_userblocked, блокировка не применяется.
+    Назначение: Эндпоинт для расчета распределения платежа по залоговым билетам
+    Описание: Принимает массив платежей, проверяет их валидность,
+              передает в функцию db_calculate_payment_distribution и форматирует ответ
+    Принцип работы: 
+        1. Проверяет валидность JSON формата
+        2. Принимает как объект с полем 'payments' или как массив напрямую
+        3. Передает строку в db_calculate_payment_distribution
+        4. Добавляет поле status к ответу
+        5. Формирует ответ в требуемом формате
+    Входящие параметры: request - HTTP запрос с JSON телом
+    Исходящие параметры: web.Response - JSON ответ с результатом расчета
     """
-    endpoint = '/payment/calculate-distribution'
-
     try:
+        # Аутентификация по токену (с проверкой подписи клиента)
         token = await authenticate_request(request)
-        request.authenticated_token = token
-
+        if verbose_mode:
+            print_status("OK", f"Аутентификация пройдена", f"токен {token[:8]}...")
+        
+        # Получаем тело запроса как строку для проверки JSON валидности
+        raw_body = await request.read()
+        
+        # Шаг 1: Проверка валидности JSON формата
         try:
-            data = await request.json()
+            # Пробуем декодировать и проверить структуру JSON
+            json_str = raw_body.decode('utf-8')
+            json_data = json.loads(json_str)
+            
+            if verbose_mode:
+                print_status("OK", f"JSON валиден", f"длина: {len(json_str)} символов")
+                print(f"  Тип полученных данных: {type(json_data).__name__}")
+                
+        except json.JSONDecodeError as e:
+            if verbose_mode:
+                print_status("ERROR", f"Невалидный JSON в теле запроса", str(e))
+            
+            response_data = {
+                "status": "error",
+                "message": f"Невалидный JSON формат: {str(e)}"
+            }
+            response = web.json_response(response_data, status=200)
+            await add_server_signature_to_response(response, token)
+            return response
+        except UnicodeDecodeError as e:
+            if verbose_mode:
+                print_status("ERROR", f"Ошибка декодирования тела запроса", str(e))
+            
+            response_data = {
+                "status": "error",
+                "message": "Тело запроса должно быть в UTF-8 кодировке"
+            }
+            response = web.json_response(response_data, status=200)
+            await add_server_signature_to_response(response, token)
+            return response
+        
+        # Шаг 2: Обработка разных форматов входных данных
+        payments_data = None
+        
+        if isinstance(json_data, list):
+            # Если пришел массив напрямую - используем его как платежи
+            if verbose_mode:
+                print_status("INFO", f"Получен массив платежей", f"количество: {len(json_data)}")
+            payments_data = json_data
+        elif isinstance(json_data, dict):
+            # Если пришел объект - ищем поле 'payments'
+            if 'payments' in json_data and isinstance(json_data['payments'], list):
+                if verbose_mode:
+                    print_status("INFO", f"Получен объект с полем 'payments'", 
+                               f"количество: {len(json_data['payments'])}")
+                payments_data = json_data['payments']
+            else:
+                # Проверяем, может ли объект быть интерпретирован как платеж
+                if 'ticket_id' in json_data and 'amount' in json_data:
+                    if verbose_mode:
+                        print_status("INFO", f"Получен одиночный платеж как объект")
+                    payments_data = [json_data]
+                else:
+                    # Попробуем обработать объект как есть
+                    if verbose_mode:
+                        print_status("INFO", f"Передаем объект как есть", 
+                                   f"поля: {list(json_data.keys())}")
+                    payments_data = json_data
+        else:
+            if verbose_mode:
+                print_status("ERROR", f"Неверный формат данных", 
+                           f"ожидался массив или объект, получен: {type(json_data).__name__}")
+            
+            response_data = {
+                "status": "error",
+                "message": f"Неверный формат данных: ожидался массив или объект"
+            }
+            response = web.json_response(response_data, status=200)
+            await add_server_signature_to_response(response, token)
+            return response
+        
+        # Шаг 3: Подготовка данных для передачи в БД
+        try:
+            if verbose_mode:
+                if isinstance(payments_data, list):
+                    print_status("INFO", f"Подготовка данных для передачи в БД", 
+                               f"количество платежей: {len(payments_data)}")
+                    for i, payment in enumerate(payments_data[:3]):  # Выводим первые 3 для отладки
+                        print(f"  Платеж {i+1}: {payment.get('ticket_id', 'N/A')} - {payment.get('amount', 'N/A')}")
+                else:
+                    print_status("INFO", f"Подготовка данных для передачи в БД", 
+                               f"тип: {type(payments_data).__name__}")
+            
+            # Конвертируем данные обратно в JSON строку для передачи в БД
+            # Важно: передаем payments_data как есть, функция БД сама решит как обрабатывать
+            json_for_db = json.dumps(payments_data, ensure_ascii=False)
+            
+            if verbose_mode:
+                print_status("INFO", f"Передача JSON строки в базу данных", 
+                           f"длина: {len(json_for_db)} символов")
+            
+            # Передаем JSON строку в функцию (как есть, без изменений)
+            result_json_str = await db_calculate_payment_distribution(json_for_db)
+            
+            if verbose_mode:
+                print_status("OK", f"Получен результат от базы данных", 
+                           f"длина: {len(result_json_str)} символов")
+            
+            # Шаг 4: Парсим результат для добавления поля status
+            try:
+                result_data = json.loads(result_json_str)
+                
+                # Формируем финальный ответ с полем status
+                response_data = {
+                    "status": "success",
+                    "tickets": result_data  # результат функции db_calculate_payment_distribution
+                }
+                
+                response = web.json_response(response_data, status=200)
+                
+                if verbose_mode:
+                    print_status("OK", f"Сформирован ответ", 
+                               f"количество тикетов: {len(result_data) if isinstance(result_data, list) else 'один'}")
+                    
+            except json.JSONDecodeError as e:
+                if verbose_mode:
+                    print_status("ERROR", f"Ошибка парсинга результата из БД", str(e))
+                    print(f"  Результат (первые 500 символов): {result_json_str[:500]}")
+                
+                response_data = {
+                    "status": "error",
+                    "message": f"Ошибка обработки результата из базы данных: {str(e)}"
+                }
+                response = web.json_response(response_data, status=200)
+        
         except Exception as e:
             if verbose_mode:
-                print_status("ERROR", "Ошибка парсинга JSON", str(e))
-            response = web.json_response(
-                {"status": "error", "code": 400, "message": "Некорректный JSON"},
-                status=200
-            )
-            await add_server_signature_to_response(response, token)
-            return response
-
-        if not isinstance(data, dict):
-            response = web.json_response(
-                {"status": "error", "code": 400, "message": "Некорректный формат данных"},
-                status=200
-            )
-            await add_server_signature_to_response(response, token)
-            return response
-
-        user_id = data.get('user_id') or data.get('id')
-        phone = data.get('phone')
-
-        normalized_phone = None
-        if isinstance(phone, str) and phone.strip():
-            try:
-                normalized_phone = normalize_phone(phone)
-            except Exception as e:
-                if verbose_mode:
-                    print_status("ERROR", "Ошибка нормализации телефона", str(e))
-                response = web.json_response(
-                    {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                    status=200
-                )
-                await add_server_signature_to_response(response, token)
-                return response
-
-        if config.is_endpoint_userblocked(endpoint):
-            blocked_response = await ensure_user_request_not_blocked(
-                user_id=user_id,
-                phone=normalized_phone,
-                endpoint=endpoint
-            )
-            if blocked_response is not None:
-                await add_server_signature_to_response(blocked_response, token)
-                return blocked_response
-
-        amount = data.get('amount')
-        if user_id is None:
-            response = web.json_response(
-                {"status": "error", "code": 400, "message": "Поле user_id обязательно"},
-                status=200
-            )
-            await add_server_signature_to_response(response, token)
-            return response
-
-        result = await db_payment_calculate_distribution(data)
-
-        response = web.json_response(
-            {"status": "success", "code": 0, "data": result},
-            status=200
-        )
+                print_status("ERROR", f"Ошибка при расчете распределения платежа", str(e))
+            
+            response_data = {
+                "status": "error",
+                "message": f"Ошибка расчета распределения платежа: {str(e)}"
+            }
+            response = web.json_response(response_data, status=200)
+        
+        # Шаг 5: ГАРАНТИРОВАННОЕ добавление серверной подписи к заголовкам ответа
         await add_server_signature_to_response(response, token)
-        return response
-
-    except web.HTTPException:
-        raise
-    except Exception as e:
         if verbose_mode:
-            print_status("ERROR", "Ошибка в get_payment_calculate_distribution", str(e))
-        response = web.json_response(
-            {"status": "error", "code": 500, "message": "Внутренняя ошибка сервера"},
-            status=200
-        )
+            print_status("OK", f"Добавлена серверная подпись к ответу")
+        
+        return response
+        
+    except web.HTTPException as he:
+        # Перехватываем HTTP исключения (403, 404 и т.д.)
+        response_data = {
+            "status": "error",
+            "message": he.text
+        }
+        response = web.json_response(response_data, status=he.status)
+        if verbose_mode:
+            print_status("ERROR", f"HTTP исключение в get_payment_calculate_distribution",
+                        data_lines=[
+                            f"Статус: {he.status}",
+                            f"Текст: {he.text}"
+                        ])
         await add_server_signature_to_response(response, getattr(request, 'authenticated_token', None))
         return response
-    
+        
+    except Exception as e:
+        if verbose_mode:
+            print_status("ERROR", f"Неожиданная ошибка в get_payment_calculate_distribution", str(e))
+            import traceback
+            traceback.print_exc()
+        
+        response_data = {
+            "status": "error",
+            "message": f"Внутренняя ошибка сервера: {str(e)}"
+        }
+        response = web.json_response(response_data, status=200)
+        
+        # ГАРАНТИРОВАННОЕ добавление серверной подписи даже к ошибке
+        auth_header = request.headers.get("Token", "")
+        token_for_signature = auth_header[7:] if auth_header.startswith("Bearer ") else "unexpected_error"
+        await add_server_signature_to_response(response, token_for_signature)
+        
+        return response
+        
 # --- СЛУЖЕБНЫЕ ОБРАБОТЧИКИ ---
 
 async def options_handler(request):
