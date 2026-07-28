@@ -3267,32 +3267,12 @@ async def db_login(phone: str, hashed_password: str):
     Описание:
         Вызывает хранимую процедуру авторизации строго в формате:
             EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?
-        Параметры политики блокировки со стороны сайта или ПБД не передаются.
-
-        Единственный поддерживаемый формат блокировки — новый JSON-ответ БД:
-        {
-            "status": "blocked",
-            "code": 2,
-            "message": "...",
-            "blocked_until": "...",
-            "db_current_timestamp": "..."
-        }
-
-        Важно:
-        - индикатор блокировки через -2 больше не поддерживается;
-        - legacy-состояния blocked/locked вне нового JSON-формата не поддерживаются;
-        - источник истины по блокировке — только новый JSON-ответ БД.
 
     Исходящие значения:
-      - 'invalid_credentials'                  -> неверные учетные данные
-      - {'status': 'blocked', ...}            -> блокировка от БД в новом формате
-      - {'status': 'error', 'message': '...'} -> ошибка
-      - {...данные пользователя...}           -> успешная авторизация
-
-    Примечание:
-      Для совместимости с текущим get_login() при успешной авторизации
-      функция возвращает ПЛОСКИЙ словарь пользователя, а не обертку
-      {'status': 'success', 'data': ...}.
+      - 'invalid_credentials'                          -> неверные учетные данные
+      - {'status': 'error', 'code': 2, ...}           -> блокировка пользователя
+      - {'status': 'error', 'message': '...'}         -> ошибка
+      - {...данные пользователя...}                   -> успешная авторизация
     """
     if not db_connection:
         raise Exception("Подключение к базе данных отсутствует")
@@ -3374,16 +3354,35 @@ async def db_login(phone: str, hashed_password: str):
             return None
 
         if len(row) == 1:
-            parsed_json = _try_parse_json_value(row[0])
-            if isinstance(parsed_json, dict):
-                normalized = _normalize_blocked_payload(parsed_json)
-                if normalized:
-                    return normalized
-                if parsed_json.get('status') is not None:
-                    return {
-                        'status': 'error',
-                        'message': 'БД вернула JSON-ответ со статусом, отличным от поддерживаемого blocked'
-                    }
+            value = row[0]
+
+            if isinstance(value, str):
+                text = value.strip()
+
+                if text == '-2':
+                    return build_user_blocked_response_payload(
+                        message="Пользователь временно заблокирован",
+                        blocked_until=None,
+                        server_time=datetime.now()
+                    )
+
+                parsed_json = _try_parse_json_value(value)
+                if isinstance(parsed_json, dict):
+                    normalized = _normalize_blocked_payload(parsed_json)
+                    if normalized:
+                        return normalized
+                    if parsed_json.get('status') is not None:
+                        return {
+                            'status': 'error',
+                            'message': 'БД вернула JSON-ответ со статусом, отличным от поддерживаемого blocked'
+                        }
+
+            if isinstance(value, (int, float)) and int(value) == -2:
+                return build_user_blocked_response_payload(
+                    message="Пользователь временно заблокирован",
+                    blocked_until=None,
+                    server_time=datetime.now()
+                )
 
         row_dict = _row_to_dict(cursor, row)
         if isinstance(row_dict, dict):
@@ -3432,8 +3431,31 @@ async def db_login(phone: str, hashed_password: str):
 
         mapped_rows = []
         for row in rows:
+            if len(row) == 1:
+                parsed_json = _try_parse_json_value(row[0])
+                if isinstance(parsed_json, dict):
+                    mapped_rows.append(parsed_json)
+                    continue
+                if isinstance(parsed_json, list) and parsed_json:
+                    first_item = parsed_json[0]
+                    if isinstance(first_item, dict):
+                        mapped_rows.append(first_item)
+                        continue
+
             row_dict = _row_to_dict(cursor, row)
             if row_dict is not None:
+                if len(row_dict) == 1:
+                    only_value = next(iter(row_dict.values()))
+                    parsed_json = _try_parse_json_value(only_value)
+                    if isinstance(parsed_json, dict):
+                        mapped_rows.append(parsed_json)
+                        continue
+                    if isinstance(parsed_json, list) and parsed_json:
+                        first_item = parsed_json[0]
+                        if isinstance(first_item, dict):
+                            mapped_rows.append(first_item)
+                            continue
+
                 mapped_rows.append(row_dict)
 
         if not mapped_rows:
@@ -3473,13 +3495,6 @@ async def db_login(phone: str, hashed_password: str):
     def _execute_login():
         cursor = db_connection.cursor()
         try:
-            # не удалять ! временная заглушка
-            # cursor.execute(
-            #     "EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?",
-            #     phone,
-            #     hashed_password
-            # )
-
             cursor.execute(
                 "EXECUTE [dbo].[USR_Select_ID_V2] @USR_Phone = ?, @USR_Password = ?",
                 phone,
@@ -3524,7 +3539,12 @@ async def db_login(phone: str, hashed_password: str):
 
         if isinstance(result, dict) and result.get('status') == 'blocked':
             if verbose_mode:
-                print_status("WARNING", "БД вернула активную блокировку пользователя в новом JSON-формате", phone)
+                print_status("WARNING", "БД вернула активную блокировку пользователя", phone)
+            return result
+
+        if isinstance(result, dict) and result.get('status') == 'error' and result.get('code') == 2:
+            if verbose_mode:
+                print_status("WARNING", "Пользователь временно заблокирован", phone)
             return result
 
         if isinstance(result, dict) and result.get('status') == 'error':
@@ -3551,7 +3571,8 @@ async def db_login(phone: str, hashed_password: str):
         if verbose_mode:
             print_status("ERROR", "Ошибка выполнения dbo.USR_Select_ID", str(e))
         return {'status': 'error', 'message': str(e)}
-                
+
+                    
 async def db_setdocument(user_id: int, name: str, extension: str, cloud_link: str, description: str = None) -> Dict[str, Any]:
     """
     Название: db_setdocument
@@ -7834,25 +7855,19 @@ async def get_login(request):
     if config.is_endpoint_userblocked(endpoint):
         active_block = await get_active_user_block(phone=normalized_phone)
         if active_block is not None:
-            return await build_blocked_user_response(
-                active_block,
-                endpoint=endpoint,
-                reason="user_temporarily_blocked"
+            return web.json_response(
+                build_user_blocked_response_payload(
+                    message=active_block.get("message") or "Пользователь временно заблокирован",
+                    blocked_until=active_block.get("blocked_until"),
+                    server_time=datetime.now()
+                ),
+                status=200
             )
 
     hashed_password = hash_password(password.strip())
     result = await db_login(normalized_phone, hashed_password)
 
     if result == 'invalid_credentials':
-        lock_result = await register_failed_login_attempt(phone=normalized_phone)
-
-        if lock_result and lock_result.get("blocked"):
-            return await build_blocked_user_response(
-                lock_result,
-                endpoint=endpoint,
-                reason="too_many_failed_login_attempts"
-            )
-
         return web.json_response(
             {
                 "status": "error",
@@ -7863,6 +7878,9 @@ async def get_login(request):
         )
 
     if isinstance(result, dict) and result.get('status') == 'blocked':
+        return web.json_response(result, status=200)
+
+    if isinstance(result, dict) and result.get('status') == 'error' and result.get('code') == 2:
         return web.json_response(result, status=200)
 
     if isinstance(result, dict) and result.get('status') == 'error':
@@ -7882,7 +7900,7 @@ async def get_login(request):
         return web.json_response(
             {
                 "status": "success",
-                "code": 0,
+                "code": 3,
                 "data": result
             },
             status=200
@@ -7896,7 +7914,6 @@ async def get_login(request):
         },
         status=200
     )
-
 
 async def get_setdocument(request: web.Request) -> web.Response:
     """
