@@ -2109,26 +2109,16 @@ async def build_block_primary_key(user_id=None, phone=None, normalized_phone=Non
             else:
                 phone_for_lookup = normalize_phone(phone_value)
 
-                resolved_user_id = await db_get_user_id_by_phone(phone_for_lookup)
-                if resolved_user_id is not None and verbose_mode:
-                    print_status(
-                        "INFO",
-                        "build_block_primary_key: user_id вычислен по телефону",
-                        data_lines=[
-                            f"phone={phone_for_lookup!r}",
-                            f"resolved_user_id={resolved_user_id!r}"
-                        ]
-                    )
-
-                    if verbose_mode:
-                        print_status(
-                            "INFO",
-                            "build_block_primary_key: user_id вычислен по телефону",
-                            data_lines=[
-                                f"phone={phone_for_lookup!r}",
-                                f"resolved_user_id={resolved_user_id!r}"
-                            ]
-                        )
+            resolved_user_id = await db_get_user_id_by_phone(phone_for_lookup)
+            if resolved_user_id is not None and verbose_mode:
+                print_status(
+                    "INFO",
+                    "build_block_primary_key: user_id вычислен по телефону",
+                    data_lines=[
+                        f"phone={phone_for_lookup!r}",
+                        f"resolved_user_id={resolved_user_id!r}"
+                    ]
+                )
         except Exception as e:
             if verbose_mode:
                 print_status(
@@ -3263,10 +3253,10 @@ async def db_setpayment(data: str) -> bool:
 async def db_login(phone: str, hashed_password: str):
     """
     Название: db_login
-    Назначение: Авторизация пользователя через dbo.USR_Select_ID
+    Назначение: Авторизация пользователя через dbo.USR_Select_ID_V4
     Описание:
         Вызывает хранимую процедуру авторизации строго в формате:
-            EXECUTE [dbo].[USR_Select_ID] @USR_Phone = ?, @USR_Password = ?
+            EXECUTE [dbo].[USR_Select_ID_V4] @USR_Phone = ?, @USR_Password = ?
 
     Исходящие значения:
       - 'invalid_credentials'                          -> неверные учетные данные
@@ -3328,26 +3318,45 @@ async def db_login(phone: str, hashed_password: str):
             return None
 
         status = str(payload.get('status', '')).strip().lower()
-        if status != 'blocked':
-            return None
+        code = payload.get('code')
+        if code is not None:
+            try:
+                code = int(code)
+            except (ValueError, TypeError):
+                code = None
 
         blocked_until = payload.get('blocked_until')
-        db_current_timestamp = payload.get('db_current_timestamp')
 
-        if not blocked_until or not db_current_timestamp:
+        # Format 1 (old): status='blocked' with blocked_until and db_current_timestamp
+        if status == 'blocked':
+            db_current_timestamp = payload.get('db_current_timestamp')
+            if not blocked_until or not db_current_timestamp:
+                return {
+                    'status': 'error',
+                    'message': 'Некорректный JSON-ответ БД: отсутствуют blocked_until или db_current_timestamp'
+                }
             return {
-                'status': 'error',
-                'message': 'Некорректный JSON-ответ БД: отсутствуют blocked_until или db_current_timestamp'
+                'status': 'blocked',
+                'code': code or 2,
+                'message': payload.get('message') or 'Пользователь заблокирован',
+                'blocked_until': str(blocked_until),
+                'db_current_timestamp': str(db_current_timestamp),
+                'user_id': payload.get('user_id') or payload.get('id')
             }
 
-        return {
-            'status': 'blocked',
-            'code': int(payload.get('code', 2) or 2),
-            'message': payload.get('message') or 'Пользователь заблокирован',
-            'blocked_until': str(blocked_until),
-            'db_current_timestamp': str(db_current_timestamp),
-            'user_id': payload.get('user_id') or payload.get('id')
-        }
+        # Format 2 (new from USR_Select_ID_V2): {"id":..., "code":2, "blocked_until":..., "server_time":...}
+        if code == 2 and blocked_until:
+            server_time = payload.get('server_time')
+            return {
+                'status': 'blocked',
+                'code': 2,
+                'message': payload.get('message') or 'Пользователь временно заблокирован',
+                'blocked_until': str(blocked_until),
+                'db_current_timestamp': str(server_time or blocked_until),
+                'user_id': payload.get('user_id') or payload.get('id')
+            }
+
+        return None
 
     def _extract_blocked_result_from_row(cursor, row):
         if row is None:
@@ -3490,13 +3499,29 @@ async def db_login(phone: str, hashed_password: str):
                         'message': item.get('message') or lowered.get('message') or 'БД вернула ошибку авторизации'
                     }
 
+            # Format 2 (new from USR_Select_ID_V2): code=2 + blocked_until without status field
+            code = lowered.get('code')
+            if code is not None:
+                try:
+                    code = int(code)
+                except (ValueError, TypeError):
+                    code = None
+            if code == 2 and lowered.get('blocked_until'):
+                normalized = _normalize_blocked_payload(lowered)
+                if normalized:
+                    return normalized
+                return {
+                    'status': 'error',
+                    'message': 'Обнаружен JSON блокировки нового формата (code=2), но не удалось нормализовать'
+                }
+
         return mapped_rows[0] if len(mapped_rows) == 1 else mapped_rows
 
     def _execute_login():
         cursor = db_connection.cursor()
         try:
             cursor.execute(
-                "EXECUTE [dbo].[USR_Select_ID_V2] @USR_Phone = ?, @USR_Password = ?",
+                "EXECUTE [dbo].[USR_Select_ID_V4] @USR_Phone = ?, @USR_Password = ?",
                 phone,
                 hashed_password
             )
@@ -3505,6 +3530,15 @@ async def db_login(phone: str, hashed_password: str):
                 rows = cursor.fetchall() if cursor.description else []
 
                 if rows:
+                    # Пропускаем промежуточный результирующий набор от SELECT INTO #res
+                    # (содержит колонки USR_Access_Date, USR_Access_Value)
+                    if cursor.description:
+                        col_names_lower = [col[0].lower() for col in cursor.description]
+                        if 'usr_access_date' in col_names_lower or 'usr_access_value' in col_names_lower:
+                            if not cursor.nextset():
+                                break
+                            continue
+
                     for row in rows:
                         blocked_result = _extract_blocked_result_from_row(cursor, row)
                         if blocked_result is not None:
@@ -3569,7 +3603,7 @@ async def db_login(phone: str, hashed_password: str):
 
     except Exception as e:
         if verbose_mode:
-            print_status("ERROR", "Ошибка выполнения dbo.USR_Select_ID", str(e))
+            print_status("ERROR", "Ошибка выполнения dbo.USR_Select_ID_V4", str(e))
         return {'status': 'error', 'message': str(e)}
 
                     
@@ -5345,7 +5379,7 @@ async def get_user_login(request):
     if isinstance(result, dict):
         result_user_id = result.get('user_id') or result.get('id')
 
-    if isinstance(result, dict) and result.get('status') == 'blocked':
+    if isinstance(result, dict) and (result.get('status') == 'blocked' or result.get('code') == 2):
         blocked_until = result.get('blocked_until')
         blocked_from = result.get('blocked_from') or datetime.now()
 
@@ -5353,7 +5387,7 @@ async def get_user_login(request):
             user_id=result_user_id,
             normalized_phone=normalized_phone,
             blocked_from=blocked_from if isinstance(blocked_from, datetime) else datetime.now(),
-            blocked_until=blocked_until if isinstance(blocked_until, datetime) else datetime.now(),
+            blocked_until=blocked_until,  # cache_user_block сама умеет парсить строку в datetime
             reason=result.get('reason') or 'db_reported_block',
             db_current_timestamp=result.get('db_current_timestamp'),
             clock_skew_seconds=result.get('clock_skew_seconds'),
@@ -7321,7 +7355,7 @@ async def get_user_by_phone_legacy(request):
     if blocked_response is not None:
         return blocked_response
 
-    result = await db_userid(phone=normalized_phone)
+    result = await find_user_by_phone(normalized_phone)
 
     if result:
         return web.json_response(
@@ -7877,10 +7911,24 @@ async def get_login(request):
             status=200
         )
 
-    if isinstance(result, dict) and result.get('status') == 'blocked':
-        return web.json_response(result, status=200)
+    if isinstance(result, dict) and (result.get('status') == 'blocked' or result.get('code') == 2):
+        # Кэшируем блокировку из БД в локальный кэш, чтобы middleware
+        # и другие эндпоинты могли её обнаружить без повторного обращения к БД
+        blocked_until = result.get('blocked_until')
+        blocked_from = result.get('blocked_from') or datetime.now()
+        result_user_id_from_block = result.get('user_id') or result.get('id')
 
-    if isinstance(result, dict) and result.get('status') == 'error' and result.get('code') == 2:
+        await cache_user_block(
+            user_id=result_user_id_from_block,
+            normalized_phone=normalized_phone,
+            blocked_from=blocked_from if isinstance(blocked_from, datetime) else datetime.now(),
+            blocked_until=blocked_until,  # cache_user_block сама умеет парсить строку в datetime
+            reason=result.get('reason') or 'db_reported_block',
+            db_current_timestamp=result.get('db_current_timestamp'),
+            clock_skew_seconds=result.get('clock_skew_seconds'),
+            message=result.get('message') or "Пользователь временно заблокирован"
+        )
+
         return web.json_response(result, status=200)
 
     if isinstance(result, dict) and result.get('status') == 'error':
