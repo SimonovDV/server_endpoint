@@ -2024,7 +2024,8 @@ def is_password_change_endpoint(path: str) -> bool:
     Название: is_password_change_endpoint
     Назначение: Определение, относится ли путь к разрешенному сценарию смены пароля во время блокировки
     Описание:
-        Возвращает True только для эндпоинтов смены пароля.
+        Возвращает True для эндпоинтов, которые могут выполнять смену пароля
+        и принудительную разблокировку пользователя.
         Все остальные запросы заблокированного пользователя должны отклоняться.
     """
     if not path:
@@ -2037,6 +2038,7 @@ def is_password_change_endpoint(path: str) -> bool:
         '/user/password/change',
         '/user/set-password',
         '/password/change',
+        '/user/update',
     }
 
     return normalized_path in allowed_password_change_paths
@@ -7462,11 +7464,11 @@ async def get_user_update(request):
         Если endpoint /user/update включен в endpoint_userblocked,
         действует специальный режим для заблокированного пользователя:
         - если пользователь заблокирован и password отсутствует или пустой,
-          запрос отклоняется без обращения к БД;
-        - если пользователь заблокирован и password непустой,
-          запрос в БД разрешается;
-        - после успешной смены пароля локальная блокировка снимается
-          только для конкретного пользователя.
+          запрос отклоняется без обращения к БД с ответом о блокировке;
+        - если пользователь заблокирован и password передан (непустой),
+          выполняется принудительная разблокировка (удаление из локального
+          списка заблокированных) ДО обращения к БД, после чего
+          обновление данных пользователя выполняется в штатном режиме.
     """
     endpoint = '/user/update'
 
@@ -7530,15 +7532,51 @@ async def get_user_update(request):
     if endpoint_blocking_enabled:
         active_block = await get_active_user_block(user_id=user_id, phone=normalized_phone)
 
-        blocked_response = await ensure_user_request_not_blocked(
-            user_id=user_id,
-            phone=normalized_phone,
-            endpoint=endpoint,
-            allow_password_bypass=True,
-            password_present=password_present
-        )
-        if blocked_response is not None:
-            return blocked_response
+        if active_block is not None:
+            if password_present:
+                # Пользователь заблокирован, но передан password — принудительная разблокировка
+                unblock_phone = normalized_phone
+                if not unblock_phone:
+                    unblock_phone = active_block.get("normalized_phone")
+
+                log_security_event(
+                    event_type="blocked_user_password_changed",
+                    level="INFO",
+                    user_id=user_id,
+                    normalized_phone=unblock_phone,
+                    endpoint=endpoint,
+                    reason="password_changed_while_blocked",
+                    result="unblocked"
+                )
+
+                await remove_user_block(user_id=user_id, phone=unblock_phone)
+                await clear_failed_login_attempts(phone=unblock_phone, user_id=user_id)
+                # После разблокировки продолжаем выполнение — обновление данных пользователя
+            else:
+                # Пользователь заблокирован, password отсутствует или пустой — отклоняем запрос
+                log_security_event(
+                    event_type="blocked_db_request_denied",
+                    level="WARNING",
+                    user_id=active_block.get("user_id"),
+                    normalized_phone=active_block.get("normalized_phone"),
+                    endpoint=endpoint,
+                    reason=active_block.get("reason"),
+                    result="denied",
+                    details={
+                        "blocked_from": active_block.get("blocked_from").isoformat() if active_block.get("blocked_from") else None,
+                        "blocked_until": active_block.get("blocked_until").isoformat() if active_block.get("blocked_until") else None,
+                        "cache_key": active_block.get("cache_key")
+                    }
+                )
+
+                return web.json_response(
+                    build_user_blocked_response_payload(
+                        message=active_block.get("message") or "Пользователь временно заблокирован",
+                        blocked_until=active_block.get("blocked_until"),
+                        server_time=datetime.now()
+                    ),
+                    status=200
+                )
 
     if not password_present:
         return web.json_response(
@@ -7563,25 +7601,6 @@ async def get_user_update(request):
         )
 
     is_success = bool(result)
-
-    if endpoint_blocking_enabled and is_success and password_present:
-        unblock_phone = normalized_phone
-        if not unblock_phone and active_block:
-            unblock_phone = active_block.get("normalized_phone")
-
-        if active_block:
-            log_security_event(
-                event_type="blocked_user_password_changed",
-                level="INFO",
-                user_id=user_id,
-                normalized_phone=unblock_phone,
-                endpoint=endpoint,
-                reason="password_changed_while_blocked",
-                result="unblocked"
-            )
-
-        await remove_user_block(user_id=user_id, phone=unblock_phone)
-        await clear_failed_login_attempts(phone=unblock_phone, user_id=user_id)
 
     if is_success:
         return web.json_response(
@@ -7662,7 +7681,7 @@ async def get_tickets(request):
     result = await db_tickets(str(user_id), status_param)
 
     return web.json_response(
-        result if isinstance(result, dict) else {"status": "success", "code": 0, "data": result},
+        result if isinstance(result, dict) else {"status": "success", "code": 0, "tickets": result},
         status=200
     )
 
@@ -8060,6 +8079,21 @@ async def get_setdocument(request: web.Request) -> web.Response:
             user_id = data.get('user_id')      # ID пользователя 
             doc_type = data.get('type')  # Тип документа (опционально)
 
+            # БЛОКИРОВКА ПОЛЬЗОВАТЕЛЯ
+            # Проверка выполняется только если передан user_id (необязательный параметр).
+            # phone в данном эндпоинте не передаётся, поэтому не используется для проверки.
+            endpoint_path = '/document/load'
+
+            if user_id is not None and str(user_id).strip() and config.is_endpoint_userblocked(endpoint_path):
+                blocked_response = await ensure_user_request_not_blocked(
+                    user_id=user_id,
+                    phone=None,
+                    endpoint=endpoint_path
+                )
+                if blocked_response is not None:
+                    if verbose_mode:
+                        print_status("BLOCKED", f"Запрос заблокирован для user_id={user_id}")
+                    return blocked_response
 
             # Шаг 5: Валидация расширения файла (принимаем любые расширения)
             extension_lower = extension.lower().strip()
@@ -8404,25 +8438,22 @@ async def get_documentlist(request):
             status=200
         )
 
-    user_id = data.get('user_id') or data.get('id')
-    phone = data.get('phone')
+    # Шаг 1: Проверка обязательных полей
+    validation_result = validate_required_params(data, ['user_id'])
 
-    normalized_phone = None
-    if isinstance(phone, str) and phone.strip():
-        try:
-            normalized_phone = normalize_phone(phone)
-        except Exception as e:
-            if verbose_mode:
-                print_status("ERROR", "Ошибка нормализации телефона", str(e))
-            return web.json_response(
-                {"status": "error", "code": 400, "message": "Некорректный номер телефона"},
-                status=200
-            )
+    if validation_result['status'] == 'error':
+        response = web.json_response(validation_result, status=200)
+        if verbose_mode:
+            print_status("ERROR", "Ошибка валидации параметров", validation_result['message'])
+        return response
 
+    user_id = data['user_id']
+
+    # БЛОКИРОВКА ПОЛЬЗОВАТЕЛЯ
     if config.is_endpoint_userblocked(endpoint):
         blocked_response = await ensure_user_request_not_blocked(
             user_id=user_id,
-            phone=normalized_phone,
+            phone=None,
             endpoint=endpoint
         )
         if blocked_response is not None:
