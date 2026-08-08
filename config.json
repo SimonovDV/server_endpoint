@@ -1,5 +1,5 @@
 {
-  "host": "172.18.29.218",
+  "host": "192.168.0.19",
   "port": 8000,
   "debug": false,
   "config_reload_interval_minutes": 0,
@@ -43,9 +43,12 @@
       "/user/login",
       "/user/by-phone",
       "/user/update",
-      "/ticket/list"
+      "/user/mailing",
+      "/ticket/list",
+      "/payment/set",
+      "/document/load",
+      "/document/list"
     ],
-
     "login_security": {
       "enabled": true,
       "max_failed_attempts": 5,
